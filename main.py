@@ -106,6 +106,22 @@ def obtener_cerebro():
         print(f"Error leyendo Notion: {e}")
         return _cache["texto"] or FALLBACK_CEREBRO
 
+
+# ─── DIAGNÓSTICO DE ARRANQUE (temporal) ─────────────────────────────────────
+print("[INIT] ====== Soulcute bot arrancando (version NOTION) ======", flush=True)
+print(f"[INIT] NOTION_TOKEN presente: {bool(NOTION_TOKEN)} (largo={len(NOTION_TOKEN)})", flush=True)
+print(f"[INIT] NOTION_PAGE_ID presente: {bool(NOTION_PAGE_ID)} (largo={len(NOTION_PAGE_ID)}) valor='{NOTION_PAGE_ID}'", flush=True)
+try:
+    if NOTION_TOKEN and NOTION_PAGE_ID:
+        _prueba = _leer_bloques(NOTION_PAGE_ID)
+        print(f"[INIT] Prueba lectura Notion: {len(_prueba)} caracteres leidos", flush=True)
+        print(f"[INIT] Primeros 120 chars: {_prueba[:120]!r}", flush=True)
+    else:
+        print("[INIT] No se intenta leer Notion porque falta una variable.", flush=True)
+except Exception as e:
+    print(f"[INIT] Excepcion probando Notion: {e}", flush=True)
+print("[INIT] ====== fin diagnostico ======", flush=True)
+
 # ─── ENVIAR MENSAJE DE WHATSAPP ─────────────────────────────────────────────
 def enviar_whatsapp(numero, texto):
     url = f"https://graph.facebook.com/v21.0/{WHATSAPP_PHONE_ID}/messages"

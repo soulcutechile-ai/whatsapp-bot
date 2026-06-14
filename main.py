@@ -40,6 +40,10 @@ NOTION_DB_CONVERSACIONES = os.environ.get(
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 MODELO_AUDIO = "whisper-large-v3-turbo"
 
+# Shopify: datos en vivo de productos (precio, stock, tallas, descripción)
+SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE", "")   # ej: soulcute.myshopify.com
+SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN", "")   # Admin API token con read_products y read_inventory
+
 # Telegram opcional: avisos cuando una conversación necesita humano
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -62,8 +66,36 @@ INSTRUCCION_FIJA = (
     "Nunca hables de 'bajar de peso' (di 'moldear', 'estilizar', 'realzar la figura'). "
     "Nunca inventes datos que no estén en tu información; si no sabes algo, ofrece amablemente que una "
     "persona del equipo lo confirme. Sé concisa y natural para WhatsApp. "
+    "Cuando la clienta pregunte por PRECIO, STOCK, tallas, colores o detalles de un producto, usa la "
+    "herramienta 'consultar_producto' (con el handle del producto) ANTES de responder. Los datos en vivo de "
+    "la tienda mandan sobre cualquier precio o detalle escrito en tu información. Nunca inventes precio ni "
+    "disponibilidad. "
     "A continuación tienes toda tu información y reglas:\n\n"
 )
+
+# ─── HERRAMIENTAS QUE PUEDE USAR LA IA ──────────────────────────────────────
+HERRAMIENTAS = [
+    {
+        "name": "consultar_producto",
+        "description": (
+            "Consulta datos REALES y en vivo de un producto en Shopify: precio, descripción, tallas, colores y "
+            "stock. Úsala SIEMPRE que la clienta pregunte por el precio, si hay stock, si una talla/color está "
+            "disponible, o por detalles del producto, ANTES de responder. Pasa el 'handle' del producto (la parte "
+            "final del link en 'LINKS DIRECTOS DE PRODUCTOS', ej: para soulcute.cl/products/jeans-nova el handle es "
+            "'jeans-nova'). Si no sabes el handle, usa 'busqueda' con el nombre del producto. Si la clienta indicó "
+            "talla o color, pásalos también para filtrar."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "handle":   {"type": "string", "description": "Handle del producto, ej: 'jeans-nova', 'body-figura-ideal'"},
+                "busqueda": {"type": "string", "description": "Nombre del producto a buscar si no sabes el handle, ej: 'jeans nova'"},
+                "talla":    {"type": "string", "description": "Talla consultada, ej '42', 'M', 'XL'. Opcional."},
+                "color":    {"type": "string", "description": "Color consultado, ej 'Gris', 'Negro'. Opcional."},
+            },
+        },
+    }
+]
 
 # ─── CEREBRO DESDE NOTION (con caché para velocidad) ────────────────────────
 _cache = {"texto": None, "momento": 0}
@@ -155,6 +187,91 @@ def _guardar_conversacion(numero, quien, mensaje):
 def guardar_conversacion(numero, quien, mensaje):
     threading.Thread(target=_guardar_conversacion, args=(numero, quien, mensaje), daemon=True).start()
 
+# ─── CONSULTAR PRODUCTO EN VIVO (Shopify) ───────────────────────────────────
+def _fmt_clp(amount):
+    try:
+        n = int(round(float(amount)))
+        return "$" + f"{n:,}".replace(",", ".")
+    except Exception:
+        return f"${amount}"
+
+def consultar_producto(handle=None, busqueda=None, talla=None, color=None):
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        return "No tengo acceso al catálogo en vivo ahora; deriva a una persona del equipo."
+    if handle:
+        h = handle.strip().lower().lstrip("/")
+        if h.startswith("products/"):
+            h = h.split("products/", 1)[1]
+        q = f"handle:{h}"
+    elif busqueda:
+        q = busqueda.strip()
+    else:
+        return "No se indicó qué producto consultar."
+    query = (
+        "query($q:String!){ products(first:1, query:$q){ edges{ node{ "
+        "title handle description onlineStoreUrl "
+        "priceRangeV2{ minVariantPrice{ amount } maxVariantPrice{ amount } } "
+        "variants(first:100){ edges{ node{ price inventoryQuantity availableForSale "
+        "inventoryItem{ tracked } selectedOptions{ name value } } } } } } } }"
+    )
+    try:
+        r = requests.post(
+            f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json",
+            headers={"X-Shopify-Access-Token": SHOPIFY_TOKEN, "Content-Type": "application/json"},
+            json={"query": query, "variables": {"q": q}},
+            timeout=20,
+        )
+        data = r.json()
+        edges = data.get("data", {}).get("products", {}).get("edges", [])
+        if not edges:
+            return "No encontré ese producto en la tienda."
+        node = edges[0]["node"]
+        titulo = node.get("title", "")
+        url = node.get("onlineStoreUrl") or f"https://soulcute.cl/products/{node.get('handle','')}"
+        desc = (node.get("description") or "").strip().replace("\n", " ")
+        if len(desc) > 500:
+            desc = desc[:500] + "…"
+        pr = node.get("priceRangeV2", {}) or {}
+        mn = (pr.get("minVariantPrice") or {}).get("amount")
+        mx = (pr.get("maxVariantPrice") or {}).get("amount")
+        if mn and mx and float(mn) != float(mx):
+            precio = f"{_fmt_clp(mn)} a {_fmt_clp(mx)}"
+        else:
+            precio = _fmt_clp(mn)
+        disponibles, agotadas = [], []
+        for ve in node.get("variants", {}).get("edges", []):
+            v = ve["node"]
+            opts = v.get("selectedOptions", []) or []
+            etiqueta = " ".join(o["value"] for o in opts) if opts else "única"
+            if talla and not any((talla or "").strip().lower() == o["value"].lower() for o in opts):
+                continue
+            if color and not any((color or "").strip().lower() == o["value"].lower() for o in opts):
+                continue
+            if v.get("availableForSale"):
+                qn = v.get("inventoryQuantity")
+                tracked = (v.get("inventoryItem") or {}).get("tracked", True)
+                if tracked and isinstance(qn, int) and qn > 0:
+                    disponibles.append(f"{etiqueta} (quedan {qn})")
+                else:
+                    disponibles.append(f"{etiqueta} (disponible)")
+            else:
+                agotadas.append(etiqueta)
+        partes = [f"Producto: {titulo}.", f"Precio: {precio}.", f"Link: {url}."]
+        if desc:
+            partes.append(f"Descripción: {desc}")
+        partes.append("Disponibles: " + (", ".join(disponibles) if disponibles else "ninguna que coincida") + ".")
+        if agotadas:
+            partes.append("Agotadas: " + ", ".join(agotadas) + ".")
+        return " ".join(partes)
+    except Exception as e:
+        print(f"Error consultando producto: {e}")
+        return "No pude consultar el producto ahora mismo; deriva a una persona del equipo."
+
+def ejecutar_herramienta(nombre, args):
+    if nombre == "consultar_producto":
+        return consultar_producto(args.get("handle"), args.get("busqueda"), args.get("talla"), args.get("color"))
+    return "Herramienta desconocida."
+
 # ─── DESCARGAR ARCHIVO DE WHATSAPP (imágenes / audios) ──────────────────────
 def descargar_media(media_id):
     try:
@@ -237,7 +354,7 @@ def _avisar_humano(numero, mensaje_clienta):
 def avisar_humano(numero, mensaje_clienta):
     threading.Thread(target=_avisar_humano, args=(numero, mensaje_clienta), daemon=True).start()
 
-# ─── GENERAR RESPUESTA CON IA ───────────────────────────────────────────────
+# ─── GENERAR RESPUESTA CON IA (con uso de herramientas) ─────────────────────
 def generar_respuesta(numero, contenido_api, texto_plano):
     """contenido_api: string (texto) o lista de bloques (para imágenes).
        texto_plano: versión en texto que se guarda en el historial y se usa para avisos."""
@@ -245,13 +362,31 @@ def generar_respuesta(numero, contenido_api, texto_plano):
     mensajes = historial + [{"role": "user", "content": contenido_api}]
     try:
         system = INSTRUCCION_FIJA + obtener_cerebro()
-        respuesta = cliente_ia.messages.create(
-            model=MODELO,
-            max_tokens=500,
-            system=system,
-            messages=mensajes,
-        )
-        texto = respuesta.content[0].text
+        texto = ""
+        for _ in range(4):  # permite hasta unas pocas consultas de herramientas
+            respuesta = cliente_ia.messages.create(
+                model=MODELO,
+                max_tokens=600,
+                system=system,
+                messages=mensajes,
+                tools=HERRAMIENTAS,
+            )
+            if respuesta.stop_reason == "tool_use":
+                assistant_blocks, tool_results = [], []
+                for b in respuesta.content:
+                    if b.type == "text":
+                        assistant_blocks.append({"type": "text", "text": b.text})
+                    elif b.type == "tool_use":
+                        assistant_blocks.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
+                        resultado = ejecutar_herramienta(b.name, b.input)
+                        tool_results.append({"type": "tool_result", "tool_use_id": b.id, "content": resultado})
+                mensajes.append({"role": "assistant", "content": assistant_blocks})
+                mensajes.append({"role": "user", "content": tool_results})
+                continue
+            texto = "".join(b.text for b in respuesta.content if b.type == "text").strip()
+            break
+        if not texto:
+            texto = "¡Hola! 💕 Dame un segundito, una persona del equipo te ayuda con esto enseguida."
         historial.append({"role": "user", "content": texto_plano})
         historial.append({"role": "assistant", "content": texto})
         conversaciones[numero] = historial[-MAX_HISTORIAL:]

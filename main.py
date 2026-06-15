@@ -94,7 +94,53 @@ HERRAMIENTAS = [
                 "color":    {"type": "string", "description": "Color consultado, ej 'Gris', 'Negro'. Opcional."},
             },
         },
-    }
+    },
+    {
+        "name": "consultar_pedido",
+        "description": (
+            "Consulta el estado REAL de un pedido en Shopify: estado de pago, fulfillment, y número de seguimiento. "
+            "Úsala cuando la clienta pregunte '¿dónde está mi pedido?', '¿llegó?', '¿cuándo llega?', "
+            "'¿tienen mi número de seguimiento?', o similar. Pasa el número de pedido (ej: '1042') o el email/teléfono "
+            "de la clienta para buscarlo."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "numero_pedido": {"type": "string", "description": "Número de pedido, ej: '1042' o '#1042'. Opcional si tienes email."},
+                "email":        {"type": "string", "description": "Email de la clienta para buscar su pedido. Opcional si tienes número."},
+            },
+        },
+    },
+    {
+        "name": "validar_descuento",
+        "description": (
+            "Verifica si un código de descuento existe en Shopify, si está activo, y sus condiciones (mínimo de compra, "
+            "fecha de vencimiento, usos restantes). Úsala cuando una clienta diga que un código no le funciona, ANTES "
+            "de explicarle posibles causas. Pasa el código exacto que la clienta está intentando usar."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "codigo": {"type": "string", "description": "El código de descuento exacto que la clienta está usando, ej: 'SC2610'"},
+            },
+            "required": ["codigo"],
+        },
+    },
+    {
+        "name": "verificar_cliente",
+        "description": (
+            "Verifica si una persona ya es cliente de Soulcute (si ha comprado antes) buscando por email o teléfono. "
+            "Úsala cuando necesites saber si aplica el descuento de primera compra (SC2610), ya que ese código "
+            "solo es válido para quien nunca ha comprado. Pasa el email o teléfono de la clienta."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email":    {"type": "string", "description": "Email de la clienta. Opcional si tienes teléfono."},
+                "telefono": {"type": "string", "description": "Teléfono de la clienta (con o sin código de país). Opcional si tienes email."},
+            },
+        },
+    },
 ]
 
 # ─── CEREBRO DESDE NOTION (con caché para velocidad) ────────────────────────
@@ -267,9 +313,160 @@ def consultar_producto(handle=None, busqueda=None, talla=None, color=None):
         print(f"Error consultando producto: {e}")
         return "No pude consultar el producto ahora mismo; deriva a una persona del equipo."
 
+# ─── CONSULTAR PEDIDO EN SHOPIFY ────────────────────────────────────────────
+def consultar_pedido(numero_pedido=None, email=None):
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        return "No tengo acceso a los pedidos ahora; deriva a una persona del equipo."
+    headers = {"X-Shopify-Access-Token": SHOPIFY_TOKEN, "Content-Type": "application/json"}
+    try:
+        if numero_pedido:
+            num = numero_pedido.strip().lstrip("#")
+            query = (
+                "query($q:String!){ orders(first:1, query:$q){ edges{ node{ "
+                "name displayFinancialStatus displayFulfillmentStatus "
+                "fulfillments{ trackingInfo{ number url } } "
+                "lineItems(first:5){ edges{ node{ title quantity } } } "
+                "} } } }"
+            )
+            variables = {"q": f"name:#{num}"}
+        elif email:
+            query = (
+                "query($q:String!){ orders(first:1, query:$q, sortKey:CREATED_AT, reverse:true){ edges{ node{ "
+                "name displayFinancialStatus displayFulfillmentStatus "
+                "fulfillments{ trackingInfo{ number url } } "
+                "lineItems(first:5){ edges{ node{ title quantity } } } "
+                "} } } }"
+            )
+            variables = {"q": f"email:{email.strip()}"}
+        else:
+            return "No se indicó número de pedido ni email para buscar."
+        r = requests.post(
+            f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json",
+            headers=headers, json={"query": query, "variables": variables}, timeout=20,
+        )
+        edges = r.json().get("data", {}).get("orders", {}).get("edges", [])
+        if not edges:
+            return "No encontré ningún pedido con esos datos."
+        o = edges[0]["node"]
+        nombre = o.get("name", "")
+        pago = o.get("displayFinancialStatus", "")
+        fulfillment = o.get("displayFulfillmentStatus", "")
+        productos = ", ".join(
+            f"{e['node']['title']} x{e['node']['quantity']}"
+            for e in o.get("lineItems", {}).get("edges", [])
+        )
+        tracking_info = []
+        for f in (o.get("fulfillments") or []):
+            for t in (f.get("trackingInfo") or []):
+                if t.get("number"):
+                    tracking_info.append(f"N° {t['number']}" + (f" — {t['url']}" if t.get("url") else ""))
+        partes = [f"Pedido {nombre}.", f"Pago: {pago}.", f"Estado de envío: {fulfillment}."]
+        if productos:
+            partes.append(f"Productos: {productos}.")
+        if tracking_info:
+            partes.append("Seguimiento: " + "; ".join(tracking_info) + ".")
+        else:
+            partes.append("Aún no hay número de seguimiento disponible.")
+        return " ".join(partes)
+    except Exception as e:
+        print(f"Error consultando pedido: {e}")
+        return "No pude consultar el pedido ahora; deriva a una persona del equipo."
+
+# ─── VALIDAR CÓDIGO DE DESCUENTO EN SHOPIFY ─────────────────────────────────
+def validar_descuento(codigo):
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        return "No tengo acceso a los descuentos ahora; deriva a una persona del equipo."
+    try:
+        query = (
+            "query($q:String!){ codeDiscountNodes(first:1, query:$q){ edges{ node{ "
+            "codeDiscount { ... on DiscountCodeBasic { "
+            "title status usageLimit usedCount "
+            "startsAt endsAt "
+            "minimumRequirement { ... on DiscountMinimumSubtotal { greaterThanOrEqualToSubtotal { amount } } } "
+            "customerEligibility { ... on DiscountCustomers { customers { edges { node { id } } } } } "
+            "} } } } } }"
+        )
+        r = requests.post(
+            f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json",
+            headers={"X-Shopify-Access-Token": SHOPIFY_TOKEN, "Content-Type": "application/json"},
+            json={"query": query, "variables": {"q": f"code:{codigo.strip().upper()}"}},
+            timeout=20,
+        )
+        edges = r.json().get("data", {}).get("codeDiscountNodes", {}).get("edges", [])
+        if not edges:
+            return f"El código '{codigo}' no existe en la tienda o está mal escrito."
+        d = edges[0]["node"].get("codeDiscount", {})
+        status = d.get("status", "")
+        if status == "EXPIRED":
+            return f"El código '{codigo}' existe pero está VENCIDO."
+        if status == "SCHEDULED":
+            return f"El código '{codigo}' aún no está activo (programado para el futuro)."
+        limit = d.get("usageLimit")
+        used = d.get("usedCount", 0)
+        if limit and used >= limit:
+            return f"El código '{codigo}' es válido pero ya agotó todos sus usos ({used}/{limit})."
+        minimo = None
+        req = d.get("minimumRequirement") or {}
+        sub = req.get("greaterThanOrEqualToSubtotal") or {}
+        if sub.get("amount"):
+            minimo = _fmt_clp(sub["amount"])
+        partes = [f"El código '{codigo}' está ACTIVO."]
+        if minimo:
+            partes.append(f"Requiere mínimo de compra de {minimo}.")
+        if limit:
+            partes.append(f"Usos: {used}/{limit}.")
+        ends = d.get("endsAt")
+        if ends:
+            partes.append(f"Vence: {ends[:10]}.")
+        return " ".join(partes)
+    except Exception as e:
+        print(f"Error validando descuento: {e}")
+        return "No pude verificar el código ahora; deriva a una persona del equipo."
+
+# ─── VERIFICAR SI CLIENTA YA HA COMPRADO (para descuento primera compra) ────
+def verificar_cliente(email=None, telefono=None):
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        return "No tengo acceso a los clientes ahora; deriva a una persona del equipo."
+    try:
+        if email:
+            q = f"email:{email.strip()}"
+        elif telefono:
+            tel = telefono.strip().replace(" ", "").replace("+", "")
+            q = f"phone:{tel}"
+        else:
+            return "No se indicó email ni teléfono para verificar."
+        query = (
+            "query($q:String!){ customers(first:1, query:$q){ edges{ node{ "
+            "numberOfOrders ordersCount { count } "
+            "} } } }"
+        )
+        r = requests.post(
+            f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json",
+            headers={"X-Shopify-Access-Token": SHOPIFY_TOKEN, "Content-Type": "application/json"},
+            json={"query": query, "variables": {"q": q}},
+            timeout=20,
+        )
+        edges = r.json().get("data", {}).get("customers", {}).get("edges", [])
+        if not edges:
+            return "No encontré esta persona en los clientes de la tienda. Podría ser su primera compra."
+        c = edges[0]["node"]
+        count = c.get("numberOfOrders") or (c.get("ordersCount") or {}).get("count") or 0
+        if count == 0:
+            return "Esta persona está registrada pero nunca ha completado una compra. Aplica el descuento de primera compra."
+        return f"Esta persona ya tiene {count} compra(s) registrada(s). El código SC2610 (primera compra) NO le aplica."
+    except Exception as e:
+        print(f"Error verificando cliente: {e}")
+        return "No pude verificar el historial de compras ahora; deriva a una persona del equipo."
+
 def ejecutar_herramienta(nombre, args):
     if nombre == "consultar_producto":
         return consultar_producto(args.get("handle"), args.get("busqueda"), args.get("talla"), args.get("color"))
+    if nombre == "consultar_pedido":
+        return consultar_pedido(args.get("numero_pedido"), args.get("email"))
+    if nombre == "validar_descuento":
+        return validar_descuento(args.get("codigo", ""))
+    if nombre == "verificar_cliente":
+        return verificar_cliente(args.get("email"), args.get("telefono"))
     return "Herramienta desconocida."
 
 # ─── DESCARGAR ARCHIVO DE WHATSAPP (imágenes / audios) ──────────────────────
@@ -515,3 +712,4 @@ def inicio():
 if __name__ == "__main__":
     puerto = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=puerto)
+    

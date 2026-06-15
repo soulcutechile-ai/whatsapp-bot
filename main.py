@@ -67,9 +67,14 @@ INSTRUCCION_FIJA = (
     "Nunca inventes datos que no estén en tu información; si no sabes algo, ofrece amablemente que una "
     "persona del equipo lo confirme. Sé concisa y natural para WhatsApp. "
     "Cuando la clienta pregunte por PRECIO, STOCK, tallas, colores o detalles de un producto, usa la "
-    "herramienta 'consultar_producto' (con el handle del producto) ANTES de responder. Los datos en vivo de "
-    "la tienda mandan sobre cualquier precio o detalle escrito en tu información. Nunca inventes precio ni "
-    "disponibilidad. "
+    "herramienta 'consultar_producto' ANTES de responder. "
+    "REGLA CRÍTICA: el parámetro 'handle' es SOLO el identificador base del producto, SIN color ni talla. "
+    "Ejemplos correctos: handle='body-figura-ideal', handle='jeans-nova', handle='body-diosa-fit-copia'. "
+    "Si la clienta pide un color o talla específico, pásalos en los parámetros 'color' y 'talla', NUNCA los agregues al handle. "
+    "INCORRECTO: handle='body-figura-ideal-negro'. CORRECTO: handle='body-figura-ideal', color='Negro'. "
+    "Los handles exactos están en la sección LINKS DIRECTOS DE PRODUCTOS de tu información. "
+    "Los datos en vivo de Shopify mandan sobre cualquier precio o detalle escrito en tu información. "
+    "Nunca inventes precio ni disponibilidad. "
     "A continuación tienes toda tu información y reglas:\n\n"
 )
 
@@ -168,18 +173,6 @@ def _leer_bloques(page_id, prof=0):
             print(f"Notion error {r.status_code}: {r.text[:200]}")
             return ""
         data = r.json()
-        print("STATUS SHOPIFY:", r.status_code)
-        try:
-            print("RESPUESTA SHOPIFY:")
-            print(r.text[:1000])
-        except Exception:
-            pass
-
-        if data.get("errors"):
-            print("GRAPHQL ERRORS:")
-            print(data["errors"])
-            return f"Error Shopify: {data['errors']}"
-
         for b in data.get("results", []):
             t = b.get("type", "")
             obj = b.get(t, {})
@@ -254,14 +247,6 @@ def _fmt_clp(amount):
         return f"${amount}"
 
 def consultar_producto(handle=None, busqueda=None, talla=None, color=None):
-    print("\n========== SHOPIFY DEBUG ===========")
-    print("HANDLE:", handle)
-    print("BUSQUEDA:", busqueda)
-    print("TALLA:", talla)
-    print("COLOR:", color)
-    print("SHOPIFY_STORE:", SHOPIFY_STORE)
-    print("TOKEN EXISTE:", bool(SHOPIFY_TOKEN))
-    print("===================================\n")
     if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
         return "No tengo acceso al catálogo en vivo ahora; deriva a una persona del equipo."
     if handle:
@@ -288,18 +273,6 @@ def consultar_producto(handle=None, busqueda=None, talla=None, color=None):
             timeout=20,
         )
         data = r.json()
-        print("STATUS SHOPIFY:", r.status_code)
-        try:
-            print("RESPUESTA SHOPIFY:")
-            print(r.text[:1000])
-        except Exception:
-            pass
-
-        if data.get("errors"):
-            print("GRAPHQL ERRORS:")
-            print(data["errors"])
-            return f"Error Shopify: {data['errors']}"
-
         edges = data.get("data", {}).get("products", {}).get("edges", [])
         if not edges:
             return "No encontré ese producto en la tienda."
@@ -491,18 +464,8 @@ def verificar_cliente(email=None, telefono=None):
         return "No pude verificar el historial de compras ahora; deriva a una persona del equipo."
 
 def ejecutar_herramienta(nombre, args):
-    print("\n==============================")
-    print("HERRAMIENTA LLAMADA:", nombre)
-    print("ARGS:", args)
-    print("==============================\n")
-
     if nombre == "consultar_producto":
-        return consultar_producto(
-            args.get("handle"),
-            args.get("busqueda"),
-            args.get("talla"),
-            args.get("color")
-        )
+        return consultar_producto(args.get("handle"), args.get("busqueda"), args.get("talla"), args.get("color"))
     if nombre == "consultar_pedido":
         return consultar_pedido(args.get("numero_pedido"), args.get("email"))
     if nombre == "validar_descuento":

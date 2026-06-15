@@ -247,6 +247,7 @@ def _fmt_clp(amount):
         return f"${amount}"
 
 def consultar_producto(handle=None, busqueda=None, talla=None, color=None):
+    print(f"[SHOPIFY] STORE={repr(SHOPIFY_STORE)} TOKEN_EXISTS={bool(SHOPIFY_TOKEN)} TOKEN_PREFIX={SHOPIFY_TOKEN[:8] if SHOPIFY_TOKEN else 'vacío'}")
     if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
         return "No tengo acceso al catálogo en vivo ahora; deriva a una persona del equipo."
     if handle:
@@ -272,7 +273,13 @@ def consultar_producto(handle=None, busqueda=None, talla=None, color=None):
             json={"query": query, "variables": {"q": q}},
             timeout=20,
         )
+        print(f"[SHOPIFY] STATUS={r.status_code} URL=https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json")
+        if r.status_code != 200:
+            print(f"[SHOPIFY] ERROR BODY={r.text[:300]}")
         data = r.json()
+        errors = data.get("errors")
+        if errors:
+            print(f"[SHOPIFY] GRAPHQL ERRORS={errors}")
         edges = data.get("data", {}).get("products", {}).get("edges", [])
         if not edges:
             return "No encontré ese producto en la tienda."

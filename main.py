@@ -40,9 +40,10 @@ NOTION_DB_CONVERSACIONES = os.environ.get(
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 MODELO_AUDIO = "whisper-large-v3-turbo"
 
-# Shopify: datos en vivo de productos (precio, stock, tallas, descripción)
-SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE", "")   # ej: soulcute.myshopify.com
-SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN", "")   # Admin API token con read_products y read_inventory
+# Shopify: credenciales para autenticación automática (Client Credentials Grant)
+SHOPIFY_STORE         = os.environ.get("SHOPIFY_STORE", "")
+SHOPIFY_CLIENT_ID     = os.environ.get("SHOPIFY_CLIENT_ID", "")
+SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "")
 
 # Telegram opcional: avisos cuando una conversación necesita humano
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
@@ -238,6 +239,44 @@ def _guardar_conversacion(numero, quien, mensaje):
 def guardar_conversacion(numero, quien, mensaje):
     threading.Thread(target=_guardar_conversacion, args=(numero, quien, mensaje), daemon=True).start()
 
+# ─── TOKEN SHOPIFY: RENOVACIÓN AUTOMÁTICA (Client Credentials Grant) ─────────
+_shopify_token_cache = {"token": None, "expires_at": 0}
+
+def get_shopify_token() -> str:
+    """
+    Devuelve un token válido de Shopify Admin API.
+    Lo renueva automáticamente 1 hora antes de que expire (cada ~23h).
+    """
+    ahora = time.time()
+    margen = 3600  # renovar 1 hora antes de expirar
+
+    if _shopify_token_cache["token"] and ahora < (_shopify_token_cache["expires_at"] - margen):
+        return _shopify_token_cache["token"]
+
+    if not SHOPIFY_CLIENT_ID or not SHOPIFY_CLIENT_SECRET:
+        print("[SHOPIFY] Faltan SHOPIFY_CLIENT_ID o SHOPIFY_CLIENT_SECRET en Railway.")
+        return ""
+
+    try:
+        r = requests.post(
+            f"https://{SHOPIFY_STORE}/admin/oauth/access_token",
+            params={
+                "grant_type": "client_credentials",
+                "client_id": SHOPIFY_CLIENT_ID,
+                "client_secret": SHOPIFY_CLIENT_SECRET,
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        _shopify_token_cache["token"] = data["access_token"]
+        _shopify_token_cache["expires_at"] = ahora + data.get("expires_in", 86400)
+        print(f"[SHOPIFY] Token renovado automáticamente. Expira en {data.get('expires_in', 86400) // 3600}h")
+        return _shopify_token_cache["token"]
+    except Exception as e:
+        print(f"[SHOPIFY] Error renovando token: {e}")
+        return _shopify_token_cache["token"] or ""  # fallback al token anterior si existe
+
 # ─── CONSULTAR PRODUCTO EN VIVO (Shopify) ───────────────────────────────────
 def _fmt_clp(amount):
     try:
@@ -247,8 +286,10 @@ def _fmt_clp(amount):
         return f"${amount}"
 
 def consultar_producto(handle=None, busqueda=None, talla=None, color=None):
-    print(f"[SHOPIFY] STORE={repr(SHOPIFY_STORE)} TOKEN_EXISTS={bool(SHOPIFY_TOKEN)} TOKEN_PREFIX={SHOPIFY_TOKEN[:8] if SHOPIFY_TOKEN else 'vacío'}")
-    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+    if not SHOPIFY_STORE:
+        return "No tengo acceso al catálogo en vivo ahora; deriva a una persona del equipo."
+    token = get_shopify_token()
+    if not token:
         return "No tengo acceso al catálogo en vivo ahora; deriva a una persona del equipo."
     if handle:
         h = handle.strip().lower().lstrip("/")
@@ -268,12 +309,16 @@ def consultar_producto(handle=None, busqueda=None, talla=None, color=None):
     )
     try:
         r = requests.post(
-            f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json",
-            headers={"X-Shopify-Access-Token": SHOPIFY_TOKEN, "Content-Type": "application/json"},
+            f"https://{SHOPIFY_STORE}/admin/api/2026-04/graphql.json",
+            headers={"X-Shopify-Access-Token": token, "Content-Type": "application/json"},
             json={"query": query, "variables": {"q": q}},
             timeout=20,
         )
-        print(f"[SHOPIFY] STATUS={r.status_code} URL=https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json")
+        print(f"[SHOPIFY] STATUS={r.status_code} consultar_producto handle={handle}")
+        if r.status_code == 401:
+            print("[SHOPIFY] 401 en consultar_producto — limpiando caché de token")
+            _shopify_token_cache["token"] = None
+            _shopify_token_cache["expires_at"] = 0
         if r.status_code != 200:
             print(f"[SHOPIFY] ERROR BODY={r.text[:300]}")
         data = r.json()
@@ -327,9 +372,12 @@ def consultar_producto(handle=None, busqueda=None, talla=None, color=None):
 
 # ─── CONSULTAR PEDIDO EN SHOPIFY ────────────────────────────────────────────
 def consultar_pedido(numero_pedido=None, email=None):
-    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+    if not SHOPIFY_STORE:
         return "No tengo acceso a los pedidos ahora; deriva a una persona del equipo."
-    headers = {"X-Shopify-Access-Token": SHOPIFY_TOKEN, "Content-Type": "application/json"}
+    token = get_shopify_token()
+    if not token:
+        return "No tengo acceso a los pedidos ahora; deriva a una persona del equipo."
+    headers = {"X-Shopify-Access-Token": token, "Content-Type": "application/json"}
     try:
         if numero_pedido:
             num = numero_pedido.strip().lstrip("#")
@@ -353,7 +401,7 @@ def consultar_pedido(numero_pedido=None, email=None):
         else:
             return "No se indicó número de pedido ni email para buscar."
         r = requests.post(
-            f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json",
+            f"https://{SHOPIFY_STORE}/admin/api/2026-04/graphql.json",
             headers=headers, json={"query": query, "variables": variables}, timeout=20,
         )
         edges = r.json().get("data", {}).get("orders", {}).get("edges", [])
@@ -386,7 +434,10 @@ def consultar_pedido(numero_pedido=None, email=None):
 
 # ─── VALIDAR CÓDIGO DE DESCUENTO EN SHOPIFY ─────────────────────────────────
 def validar_descuento(codigo):
-    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+    if not SHOPIFY_STORE:
+        return "No tengo acceso a los descuentos ahora; deriva a una persona del equipo."
+    token = get_shopify_token()
+    if not token:
         return "No tengo acceso a los descuentos ahora; deriva a una persona del equipo."
     try:
         query = (
@@ -399,8 +450,8 @@ def validar_descuento(codigo):
             "} } } } } }"
         )
         r = requests.post(
-            f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json",
-            headers={"X-Shopify-Access-Token": SHOPIFY_TOKEN, "Content-Type": "application/json"},
+            f"https://{SHOPIFY_STORE}/admin/api/2026-04/graphql.json",
+            headers={"X-Shopify-Access-Token": token, "Content-Type": "application/json"},
             json={"query": query, "variables": {"q": f"code:{codigo.strip().upper()}"}},
             timeout=20,
         )
@@ -437,7 +488,10 @@ def validar_descuento(codigo):
 
 # ─── VERIFICAR SI CLIENTA YA HA COMPRADO (para descuento primera compra) ────
 def verificar_cliente(email=None, telefono=None):
-    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+    if not SHOPIFY_STORE:
+        return "No tengo acceso a los clientes ahora; deriva a una persona del equipo."
+    token = get_shopify_token()
+    if not token:
         return "No tengo acceso a los clientes ahora; deriva a una persona del equipo."
     try:
         if email:
@@ -453,8 +507,8 @@ def verificar_cliente(email=None, telefono=None):
             "} } } }"
         )
         r = requests.post(
-            f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json",
-            headers={"X-Shopify-Access-Token": SHOPIFY_TOKEN, "Content-Type": "application/json"},
+            f"https://{SHOPIFY_STORE}/admin/api/2026-04/graphql.json",
+            headers={"X-Shopify-Access-Token": token, "Content-Type": "application/json"},
             json={"query": query, "variables": {"q": q}},
             timeout=20,
         )
@@ -577,14 +631,12 @@ def avisar_humano(numero, mensaje_clienta, categoria="💬 Consulta general"):
 
 # ─── GENERAR RESPUESTA CON IA (con uso de herramientas) ─────────────────────
 def generar_respuesta(numero, contenido_api, texto_plano):
-    """contenido_api: string (texto) o lista de bloques (para imágenes).
-       texto_plano: versión en texto que se guarda en el historial y se usa para avisos."""
     historial = conversaciones.get(numero, [])
     mensajes = historial + [{"role": "user", "content": contenido_api}]
     try:
         system = INSTRUCCION_FIJA + obtener_cerebro()
         texto = ""
-        for _ in range(4):  # permite hasta unas pocas consultas de herramientas
+        for _ in range(4):
             respuesta = cliente_ia.messages.create(
                 model=MODELO,
                 max_tokens=600,
@@ -638,12 +690,10 @@ def recibir():
     except (KeyError, IndexError, TypeError):
         return "OK", 200
 
-    # Candado de llamadas: si llega un evento de llamada, no se contesta.
     if "calls" in value:
         print("[info] Evento de llamada ignorado (el bot no contesta llamadas).")
         return "OK", 200
 
-    # Ignorar estados de entrega y cualquier cosa que no sea un mensaje entrante.
     if "messages" not in value:
         return "OK", 200
 
@@ -651,7 +701,6 @@ def recibir():
     numero = mensaje["from"]
     tipo = mensaje.get("type")
 
-    # Evitar procesar dos veces el mismo mensaje (reintentos de WhatsApp)
     mid = mensaje.get("id")
     if mid:
         if mid in mensajes_vistos:

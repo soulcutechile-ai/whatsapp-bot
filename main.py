@@ -168,6 +168,18 @@ def _leer_bloques(page_id, prof=0):
             print(f"Notion error {r.status_code}: {r.text[:200]}")
             return ""
         data = r.json()
+        print("STATUS SHOPIFY:", r.status_code)
+        try:
+            print("RESPUESTA SHOPIFY:")
+            print(r.text[:1000])
+        except Exception:
+            pass
+
+        if data.get("errors"):
+            print("GRAPHQL ERRORS:")
+            print(data["errors"])
+            return f"Error Shopify: {data['errors']}"
+
         for b in data.get("results", []):
             t = b.get("type", "")
             obj = b.get(t, {})
@@ -242,6 +254,14 @@ def _fmt_clp(amount):
         return f"${amount}"
 
 def consultar_producto(handle=None, busqueda=None, talla=None, color=None):
+    print("\n========== SHOPIFY DEBUG ===========")
+    print("HANDLE:", handle)
+    print("BUSQUEDA:", busqueda)
+    print("TALLA:", talla)
+    print("COLOR:", color)
+    print("SHOPIFY_STORE:", SHOPIFY_STORE)
+    print("TOKEN EXISTE:", bool(SHOPIFY_TOKEN))
+    print("===================================\n")
     if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
         return "No tengo acceso al catálogo en vivo ahora; deriva a una persona del equipo."
     if handle:
@@ -268,6 +288,18 @@ def consultar_producto(handle=None, busqueda=None, talla=None, color=None):
             timeout=20,
         )
         data = r.json()
+        print("STATUS SHOPIFY:", r.status_code)
+        try:
+            print("RESPUESTA SHOPIFY:")
+            print(r.text[:1000])
+        except Exception:
+            pass
+
+        if data.get("errors"):
+            print("GRAPHQL ERRORS:")
+            print(data["errors"])
+            return f"Error Shopify: {data['errors']}"
+
         edges = data.get("data", {}).get("products", {}).get("edges", [])
         if not edges:
             return "No encontré ese producto en la tienda."
@@ -459,8 +491,18 @@ def verificar_cliente(email=None, telefono=None):
         return "No pude verificar el historial de compras ahora; deriva a una persona del equipo."
 
 def ejecutar_herramienta(nombre, args):
+    print("\n==============================")
+    print("HERRAMIENTA LLAMADA:", nombre)
+    print("ARGS:", args)
+    print("==============================\n")
+
     if nombre == "consultar_producto":
-        return consultar_producto(args.get("handle"), args.get("busqueda"), args.get("talla"), args.get("color"))
+        return consultar_producto(
+            args.get("handle"),
+            args.get("busqueda"),
+            args.get("talla"),
+            args.get("color")
+        )
     if nombre == "consultar_pedido":
         return consultar_pedido(args.get("numero_pedido"), args.get("email"))
     if nombre == "validar_descuento":
@@ -712,4 +754,3 @@ def inicio():
 if __name__ == "__main__":
     puerto = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=puerto)
-    

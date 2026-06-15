@@ -3,7 +3,7 @@ import time
 import base64
 import threading
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request
 from anthropic import Anthropic
 
@@ -449,13 +449,22 @@ def validar_descuento(codigo):
             "customerEligibility { ... on DiscountCustomers { customers { edges { node { id } } } } } "
             "} } } } } }"
         )
+        codigo_upper = codigo.strip().upper()
         r = requests.post(
             f"https://{SHOPIFY_STORE}/admin/api/2026-04/graphql.json",
             headers={"X-Shopify-Access-Token": token, "Content-Type": "application/json"},
-            json={"query": query, "variables": {"q": f"code:{codigo.strip().upper()}"}},
+            json={"query": query, "variables": {"q": codigo_upper}},
             timeout=20,
         )
-        edges = r.json().get("data", {}).get("codeDiscountNodes", {}).get("edges", [])
+        all_edges = r.json().get("data", {}).get("codeDiscountNodes", {}).get("edges", [])
+        # Filtrar exactamente el código solicitado
+        edges = [
+            e for e in all_edges
+            if any(
+                c["node"]["code"].upper() == codigo_upper
+                for c in e["node"].get("codeDiscount", {}).get("codes", {}).get("edges", [])
+            )
+        ]
         if not edges:
             return f"El código '{codigo}' no existe en la tienda o está mal escrito."
         d = edges[0]["node"].get("codeDiscount", {})
@@ -671,6 +680,121 @@ def generar_respuesta(numero, contenido_api, texto_plano):
         print(f"Error con la IA: {e}")
         return "¡Hola! 💕 En este momento tuve un problemita técnico. Una persona del equipo te responderá en breve."
 
+
+# ─── REPORTE DIARIO A TELEGRAM ──────────────────────────────────────────────
+def _leer_metricas_bot(fecha_inicio_iso, fecha_fin_iso):
+    if not NOTION_TOKEN or not NOTION_DB_CONVERSACIONES:
+        return []
+    url = f"https://api.notion.com/v1/databases/{NOTION_DB_CONVERSACIONES}/query"
+    payload = {
+        "filter": {
+            "and": [
+                {"property": "Fecha", "date": {"on_or_after": fecha_inicio_iso}},
+                {"property": "Fecha", "date": {"on_or_before": fecha_fin_iso}},
+            ]
+        },
+        "page_size": 100,
+    }
+    todos, has_more, cursor = [], True, None
+    while has_more:
+        if cursor:
+            payload["start_cursor"] = cursor
+        try:
+            r = requests.post(
+                url,
+                headers={**NOTION_HEADERS, "Content-Type": "application/json"},
+                json=payload,
+                timeout=15,
+            )
+            if r.status_code != 200:
+                break
+            data = r.json()
+            todos.extend(data.get("results", []))
+            has_more = data.get("has_more", False)
+            cursor = data.get("next_cursor")
+        except Exception as e:
+            print(f"[REPORTE] Error leyendo Notion: {e}")
+            break
+    return todos
+
+def generar_reporte_diario():
+    try:
+        ahora_chile = datetime.now(TZ)
+        ayer       = (ahora_chile - timedelta(days=1)).replace(hour=0,  minute=0,  second=0,  microsecond=0)
+        ayer_fin   = (ahora_chile - timedelta(days=1)).replace(hour=23, minute=59, second=59, microsecond=0)
+
+        registros = _leer_metricas_bot(ayer.isoformat(), ayer_fin.isoformat())
+        if not registros:
+            return None
+
+        mensajes_cliente, mensajes_bot, numeros = [], [], set()
+        derivaciones, categorias = 0, {}
+
+        for reg in registros:
+            props   = reg.get("properties", {})
+            quien   = props.get("Quién", {}).get("select", {}).get("name", "")
+            mensaje = (props.get("Mensaje", {}).get("title") or [{}])[0].get("plain_text", "")
+            numero  = props.get("Número", {}).get("phone_number", "")
+            if numero:
+                numeros.add(numero)
+            if quien == "Cliente":
+                mensajes_cliente.append(mensaje)
+            elif quien == "Bot":
+                mensajes_bot.append(mensaje)
+                if "persona del equipo" in mensaje.lower():
+                    derivaciones += 1
+                    idx = len(mensajes_bot) - 1
+                    msg_cli = mensajes_cliente[idx] if idx < len(mensajes_cliente) else ""
+                    cat = clasificar_caso(msg_cli, mensaje)
+                    categorias[cat] = categorias.get(cat, 0) + 1
+
+        fecha_str = ayer.strftime("%d/%m/%Y")
+        lineas = [
+            f"📊 <b>Reporte Bot WhatsApp — {fecha_str}</b>",
+            "",
+            f"💬 Conversaciones únicas: <b>{len(numeros)}</b>",
+            f"📨 Mensajes recibidos: <b>{len(mensajes_cliente)}</b>",
+            f"🤖 Respuestas del bot: <b>{len(mensajes_bot)}</b>",
+            f"🔔 Derivaciones al equipo: <b>{derivaciones}</b>",
+        ]
+        if categorias:
+            lineas += ["", "📂 <b>Derivaciones por categoría:</b>"]
+            for cat, cnt in sorted(categorias.items(), key=lambda x: -x[1]):
+                lineas.append(f"  {cat}: {cnt}")
+        if not numeros:
+            lineas += ["", "😴 Sin actividad ayer."]
+
+        return "\n".join(lineas)
+    except Exception as e:
+        print(f"[REPORTE] Error generando: {e}")
+        return None
+
+def _enviar_reporte_diario():
+    reporte = generar_reporte_diario()
+    if not reporte or not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": reporte, "parse_mode": "HTML"},
+            timeout=15,
+        )
+        print("[REPORTE] Enviado a Telegram ✅")
+    except Exception as e:
+        print(f"[REPORTE] Error enviando: {e}")
+
+def _scheduler_reporte():
+    """Corre en background y envía el reporte todos los días a las 8:00 AM Chile."""
+    while True:
+        ahora   = datetime.now(TZ)
+        obj     = ahora.replace(hour=8, minute=0, second=0, microsecond=0)
+        if ahora >= obj:
+            obj += timedelta(days=1)
+        segundos = (obj - ahora).total_seconds()
+        print(f"[REPORTE] Próximo reporte en {segundos/3600:.1f}h")
+        time.sleep(segundos)
+        _enviar_reporte_diario()
+
 # ─── WEBHOOK: VERIFICACIÓN ──────────────────────────────────────────────────
 @app.route("/webhook", methods=["GET"])
 def verificar():
@@ -771,5 +895,6 @@ def inicio():
     return "Bot Soulcute WhatsApp activo ✅", 200
 
 if __name__ == "__main__":
+    threading.Thread(target=_scheduler_reporte, daemon=True).start()
     puerto = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=puerto)

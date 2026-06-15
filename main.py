@@ -336,11 +336,23 @@ def enviar_whatsapp(numero, texto):
     return r
 
 # ─── AVISAR A TELEGRAM (cuando se necesita humano) ──────────────────────────
-def _avisar_humano(numero, mensaje_clienta):
+def clasificar_caso(texto_cliente, texto_bot):
+    t = f"{texto_cliente} {texto_bot}".lower()
+    if any(p in t for p in ["descuento", "cupón", "cupon", "código", "codigo", "promoción", "promocion", "sc2610"]):
+        return "🏷️ Descuento / cupón"
+    if any(p in t for p in ["cambio", "devolución", "devolucion", "reclamo", "defecto", "falla", "fallado", "roto"]):
+        return "🔄 Cambio / reclamo"
+    if any(p in t for p in ["transferencia", "transferí", "transferi", "comprobante", "pagué", "pague", "depósito", "deposito"]):
+        return "💸 Transferencia / pago"
+    if any(p in t for p in ["mayorista", "por mayor", "al por mayor"]):
+        return "📦 Mayorista"
+    return "💬 Consulta general"
+
+def _avisar_humano(numero, mensaje_clienta, categoria):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     texto = (
-        f"🔔 <b>Conversación necesita atención humana</b>\n\n"
+        f"🔔 <b>Atención humana</b>  ·  {categoria}\n\n"
         f"📱 Cliente: {numero}\n"
         f"💬 Mensaje: {mensaje_clienta}\n\n"
         f"Entra a responder cuando puedas."
@@ -351,8 +363,8 @@ def _avisar_humano(numero, mensaje_clienta):
     except Exception as e:
         print(f"Error avisando a Telegram: {e}")
 
-def avisar_humano(numero, mensaje_clienta):
-    threading.Thread(target=_avisar_humano, args=(numero, mensaje_clienta), daemon=True).start()
+def avisar_humano(numero, mensaje_clienta, categoria="💬 Consulta general"):
+    threading.Thread(target=_avisar_humano, args=(numero, mensaje_clienta, categoria), daemon=True).start()
 
 # ─── GENERAR RESPUESTA CON IA (con uso de herramientas) ─────────────────────
 def generar_respuesta(numero, contenido_api, texto_plano):
@@ -391,7 +403,8 @@ def generar_respuesta(numero, contenido_api, texto_plano):
         historial.append({"role": "assistant", "content": texto})
         conversaciones[numero] = historial[-MAX_HISTORIAL:]
         if "una persona del equipo" in texto.lower() or "déjame confirmarte" in texto.lower():
-            avisar_humano(numero, texto_plano)
+            categoria = clasificar_caso(texto_plano, texto)
+            avisar_humano(numero, texto_plano, categoria)
         return texto
     except Exception as e:
         print(f"Error con la IA: {e}")

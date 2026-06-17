@@ -49,13 +49,13 @@ SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "")
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-MODELO = "claude-sonnet-4-6"
+MODELO = "claude-haiku-4-5-20251001"
 
 app = Flask(__name__)
 cliente_ia = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 conversaciones = {}
-MAX_HISTORIAL = 10
+MAX_HISTORIAL = 6
 
 # Evita responder dos veces el mismo mensaje (WhatsApp a veces reenvía el webhook)
 mensajes_vistos = set()
@@ -151,7 +151,7 @@ HERRAMIENTAS = [
 
 # ─── CEREBRO DESDE NOTION (con caché para velocidad) ────────────────────────
 _cache = {"texto": None, "momento": 0}
-CACHE_SEGUNDOS = 120  # relee Notion cada 2 minutos como máximo
+CACHE_SEGUNDOS = 600  # relee Notion cada 2 minutos como máximo
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",

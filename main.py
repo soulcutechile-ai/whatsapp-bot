@@ -151,7 +151,7 @@ HERRAMIENTAS = [
 
 # ─── CEREBRO DESDE NOTION (con caché para velocidad) ────────────────────────
 _cache = {"texto": None, "momento": 0}
-CACHE_SEGUNDOS = 600  # relee Notion cada 2 minutos como máximo
+CACHE_SEGUNDOS = 86400  # relee Notion cada 2 minutos como máximo
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -643,7 +643,8 @@ def generar_respuesta(numero, contenido_api, texto_plano):
     historial = conversaciones.get(numero, [])
     mensajes = historial + [{"role": "user", "content": contenido_api}]
     try:
-        system = INSTRUCCION_FIJA + obtener_cerebro()
+        # Prompt Caching: el system prompt se cachea 5 min → 90% descuento en tokens de entrada
+        system = [{"type": "text", "text": INSTRUCCION_FIJA + obtener_cerebro(), "cache_control": {"type": "ephemeral"}}]
         texto = ""
         for _ in range(4):
             respuesta = cliente_ia.messages.create(
@@ -652,6 +653,7 @@ def generar_respuesta(numero, contenido_api, texto_plano):
                 system=system,
                 messages=mensajes,
                 tools=HERRAMIENTAS,
+                betas=["prompt-caching-2024-07-31"],
             )
             if respuesta.stop_reason == "tool_use":
                 assistant_blocks, tool_results = [], []

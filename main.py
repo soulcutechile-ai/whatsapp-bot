@@ -4,7 +4,7 @@ import base64
 import threading
 import requests
 from datetime import datetime, timezone, timedelta
-from flask import Flask, request
+from flask import Flask, request, jsonify, Response
 from anthropic import Anthropic
 
 # Zona horaria de Chile (para la fecha en el registro de conversaciones)
@@ -35,6 +35,10 @@ NOTION_PAGE_ID = os.environ.get("NOTION_PAGE_ID", "")
 NOTION_DB_CONVERSACIONES = os.environ.get(
     "NOTION_DB_CONVERSACIONES", "bc17e2ba-92d9-40c3-ac37-16abeb09ae34"
 )
+
+# Panel de administración
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "soulcute2024")
+NUMEROS_EN_HUMANO = set()  # números donde el bot está pausado, humano atiende
 
 # Groq: transcripción de audios (notas de voz)
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
@@ -918,6 +922,9 @@ def recibir():
                 conversaciones.pop(numero, None)
                 enviar_whatsapp(numero, "Listo, empezamos de nuevo 💕 ¿En qué te puedo ayudar?")
                 return "OK", 200
+            if numero in NUMEROS_EN_HUMANO:
+                guardar_conversacion(numero, "Cliente", texto_clienta)
+                return "OK", 200
             print(f"Mensaje de {numero}: {texto_clienta}")
             guardar_conversacion(numero, "Cliente", texto_clienta)
             respuesta = generar_respuesta(numero, texto_clienta, texto_clienta)
@@ -950,6 +957,8 @@ def recibir():
             guardar_conversacion(numero, "Bot", respuesta)
 
         elif tipo == "audio":
+            if numero in NUMEROS_EN_HUMANO:
+                return "OK", 200
             media_id = mensaje["audio"]["id"]
             transcripcion = transcribir_audio(media_id)
             if not transcripcion:
@@ -971,6 +980,255 @@ def recibir():
 @app.route("/", methods=["GET"])
 def inicio():
     return "Bot Soulcute WhatsApp activo ✅", 200
+
+# ─── PANEL DE ADMINISTRACIÓN ─────────────────────────────────────────────────
+
+def _auth_admin(req):
+    pwd = req.args.get("pwd") or req.headers.get("X-Admin-Password", "")
+    return pwd == ADMIN_PASSWORD
+
+def _notion_conversaciones():
+    """Lee últimas 50 entradas de la BD de conversaciones en Notion."""
+    try:
+        url = f"https://api.notion.com/v1/databases/{NOTION_DB_CONVERSACIONES}/query"
+        body = {"page_size": 50, "sorts": [{"timestamp": "created_time", "direction": "descending"}]}
+        r = requests.post(url, headers=NOTION_HEADERS, json=body, timeout=15)
+        if r.status_code != 200:
+            return []
+        rows = []
+        for p in r.json().get("results", []):
+            props = p.get("properties", {})
+            def txt(key):
+                arr = props.get(key, {}).get("title") or props.get(key, {}).get("rich_text") or []
+                return "".join(x.get("plain_text", "") for x in arr)
+            rows.append({
+                "numero": txt("Número"),
+                "quien": txt("Quién"),
+                "mensaje": txt("Mensaje"),
+                "fecha": p.get("created_time", "")[:16].replace("T", " "),
+            })
+        return rows
+    except Exception as e:
+        print(f"Error leyendo conversaciones Notion: {e}")
+        return []
+
+@app.route("/admin")
+def panel_admin():
+    if not _auth_admin(request):
+        return Response("Acceso denegado", 401, {"WWW-Authenticate": 'Basic realm="Soulcute Admin"'})
+    pwd = request.args.get("pwd", "")
+    html = f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soulcute — Panel WhatsApp</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/dist/tabler-icons.min.css">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}}
+body{{background:#f5f5f5;height:100vh;display:flex;flex-direction:column}}
+.topbar{{background:#7B3F6E;color:#fff;padding:10px 20px;display:flex;align-items:center;gap:12px;flex-shrink:0}}
+.topbar h1{{font-size:15px;font-weight:500}}
+.topbar span{{font-size:12px;opacity:0.75;margin-left:auto}}
+.layout{{display:flex;flex:1;overflow:hidden}}
+.sidebar{{width:280px;background:#fff;border-right:1px solid #e5e5e5;display:flex;flex-direction:column;flex-shrink:0}}
+.sidebar-header{{padding:12px 16px;border-bottom:1px solid #e5e5e5;display:flex;justify-content:space-between;align-items:center}}
+.sidebar-header h2{{font-size:13px;font-weight:500;color:#333}}
+.refresh-btn{{background:none;border:1px solid #ddd;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px;color:#666;display:flex;align-items:center;gap:4px}}
+.refresh-btn:hover{{background:#f5f5f5}}
+.conv-list{{flex:1;overflow-y:auto}}
+.conv-item{{padding:12px 16px;cursor:pointer;border-bottom:1px solid #f0f0f0;transition:background 0.1s}}
+.conv-item:hover{{background:#faf5f9}}
+.conv-item.active{{background:#f9f0f7;border-left:3px solid #7B3F6E}}
+.conv-top{{display:flex;justify-content:space-between;margin-bottom:3px}}
+.conv-num{{font-size:12px;font-weight:500;color:#333}}
+.conv-time{{font-size:11px;color:#999}}
+.conv-last{{font-size:11px;color:#777;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.badge-humano{{display:inline-block;background:#fee2e2;color:#b91c1c;font-size:10px;padding:1px 6px;border-radius:99px;margin-top:3px}}
+.badge-bot{{display:inline-block;background:#dcfce7;color:#15803d;font-size:10px;padding:1px 6px;border-radius:99px;margin-top:3px}}
+.chat-area{{flex:1;display:flex;flex-direction:column;overflow:hidden}}
+.chat-header{{padding:12px 20px;background:#fff;border-bottom:1px solid #e5e5e5;display:flex;align-items:center;gap:12px}}
+.chat-header h2{{font-size:14px;font-weight:500;flex:1}}
+.btn-tomar{{padding:6px 14px;border-radius:6px;border:1px solid #7B3F6E;color:#7B3F6E;background:#fff;cursor:pointer;font-size:12px;font-weight:500}}
+.btn-tomar:hover{{background:#7B3F6E;color:#fff}}
+.btn-liberar{{padding:6px 14px;border-radius:6px;border:1px solid #15803d;color:#15803d;background:#fff;cursor:pointer;font-size:12px;font-weight:500}}
+.btn-liberar:hover{{background:#15803d;color:#fff}}
+.messages{{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:8px;background:#f5f5f5}}
+.msg{{max-width:70%}}
+.msg-cliente{{align-self:flex-start}}
+.msg-bot{{align-self:flex-end}}
+.msg-humano{{align-self:flex-end}}
+.bubble{{padding:9px 13px;border-radius:12px;font-size:13px;line-height:1.5}}
+.bubble-cliente{{background:#fff;border:1px solid #e5e5e5;color:#333}}
+.bubble-bot{{background:#eef2ff;color:#3730a3}}
+.bubble-humano{{background:#7B3F6E;color:#fff}}
+.msg-meta{{font-size:10px;color:#999;margin-top:2px}}
+.msg-bot .msg-meta,.msg-humano .msg-meta{{text-align:right}}
+.reply-area{{padding:12px 16px;background:#fff;border-top:1px solid #e5e5e5}}
+.reply-status{{font-size:11px;color:#666;margin-bottom:8px;display:flex;align-items:center;gap:6px}}
+.reply-row{{display:flex;gap:8px}}
+textarea{{flex:1;padding:9px 12px;border:1px solid #ddd;border-radius:8px;font-size:13px;resize:none;height:60px;font-family:inherit;outline:none}}
+textarea:focus{{border-color:#7B3F6E}}
+.send-btn{{background:#7B3F6E;color:#fff;border:none;border-radius:8px;padding:0 20px;cursor:pointer;font-size:13px;font-weight:500;height:60px}}
+.send-btn:hover{{background:#6B3560}}
+.empty{{flex:1;display:flex;align-items:center;justify-content:center;color:#999;font-size:14px}}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <i class="ti ti-message-circle" style="font-size:20px"></i>
+  <h1>Soulcute — Panel WhatsApp</h1>
+  <span>+56 9 8260 1800</span>
+</div>
+<div class="layout">
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h2>Conversaciones</h2>
+      <button class="refresh-btn" onclick="cargarConversaciones()">
+        <i class="ti ti-refresh" style="font-size:12px"></i> Actualizar
+      </button>
+    </div>
+    <div class="conv-list" id="conv-list">
+      <div style="padding:20px;text-align:center;color:#999;font-size:13px">Cargando...</div>
+    </div>
+  </div>
+  <div class="chat-area" id="chat-area">
+    <div class="empty"><div style="text-align:center"><i class="ti ti-message-2" style="font-size:40px;display:block;margin-bottom:8px;opacity:0.3"></i>Selecciona una conversación</div></div>
+  </div>
+</div>
+<script>
+const PWD = "{pwd}";
+const API = (path) => path + "?pwd=" + PWD;
+let numeroActivo = null;
+let numerosHumano = new Set();
+let convData = {{}};
+
+async function cargarConversaciones() {{
+  const r = await fetch(API("/admin/api/conversaciones"));
+  const data = await r.json();
+  convData = {{}};
+  data.forEach(m => {{
+    if (!convData[m.numero]) convData[m.numero] = [];
+    convData[m.numero].push(m);
+  }});
+  const numeros = Object.keys(convData);
+  const list = document.getElementById("conv-list");
+  if (!numeros.length) {{ list.innerHTML = '<div style="padding:20px;text-align:center;color:#999;font-size:13px">Sin conversaciones</div>'; return; }}
+  list.innerHTML = numeros.map(n => {{
+    const msgs = convData[n];
+    const ultimo = msgs[0];
+    const enHumano = numerosHumano.has(n);
+    return `<div class="conv-item${{n === numeroActivo ? " active" : ""}}" onclick="abrirChat('${{n}}')">
+      <div class="conv-top"><span class="conv-num">${{n}}</span><span class="conv-time">${{ultimo.fecha.slice(11)}}</span></div>
+      <div class="conv-last">${{ultimo.quien}}: ${{ultimo.mensaje.slice(0,40)}}</div>
+      <span class="${{enHumano ? "badge-humano" : "badge-bot"}}">${{enHumano ? "🟠 Tú atiendes" : "🟢 Bot"}}</span>
+    </div>`;
+  }}).join("");
+}}
+
+function abrirChat(numero) {{
+  numeroActivo = numero;
+  cargarConversaciones();
+  const msgs = convData[numero] || [];
+  const enHumano = numerosHumano.has(numero);
+  const area = document.getElementById("chat-area");
+  area.innerHTML = `
+    <div class="chat-header">
+      <i class="ti ti-user-circle" style="font-size:28px;color:#7B3F6E"></i>
+      <h2>${{numero}}</h2>
+      ${{enHumano
+        ? `<button class="btn-liberar" onclick="liberarBot('${{numero}}')"><i class="ti ti-robot"></i> Devolver al bot</button>`
+        : `<button class="btn-tomar" onclick="tomarConversacion('${{numero}}')"><i class="ti ti-user-check"></i> Tomar conversación</button>`
+      }}
+    </div>
+    <div class="messages" id="msgs">
+      ${{[...msgs].reverse().map(m => {{
+        const cls = m.quien === "Cliente" ? "msg-cliente" : m.quien === "Bot" ? "msg-bot" : "msg-humano";
+        const bcls = m.quien === "Cliente" ? "bubble-cliente" : m.quien === "Bot" ? "bubble-bot" : "bubble-humano";
+        return `<div class="msg ${{cls}}"><div class="bubble ${{bcls}}">${{m.mensaje}}</div><div class="msg-meta">${{m.quien}} · ${{m.fecha}}</div></div>`;
+      }}).join("")}}
+    </div>
+    <div class="reply-area">
+      <div class="reply-status">${{enHumano
+        ? `<span style="color:#b45309">⚠️ Bot pausado — tú estás atendiendo este chat</span>`
+        : `<span style="color:#6b7280">ℹ️ El bot está respondiendo. Haz clic en "Tomar conversación" para responder tú.</span>`
+      }}</div>
+      <div class="reply-row">
+        <textarea id="msg-input" placeholder="${{enHumano ? "Escribe tu respuesta..." : "Toma la conversación primero para responder"}}" ${{enHumano ? "" : "disabled"}}></textarea>
+        <button class="send-btn" onclick="enviarMensaje('${{numero}}')" ${{enHumano ? "" : "disabled"}}>Enviar</button>
+      </div>
+    </div>`;
+  const msgsEl = document.getElementById("msgs");
+  if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight;
+}}
+
+async function tomarConversacion(numero) {{
+  await fetch(API("/admin/api/tomar/" + numero), {{method: "POST"}});
+  numerosHumano.add(numero);
+  abrirChat(numero);
+}}
+
+async function liberarBot(numero) {{
+  await fetch(API("/admin/api/liberar/" + numero), {{method: "POST"}});
+  numerosHumano.delete(numero);
+  abrirChat(numero);
+}}
+
+async function enviarMensaje(numero) {{
+  const input = document.getElementById("msg-input");
+  const texto = input.value.trim();
+  if (!texto) return;
+  input.value = "";
+  await fetch(API("/admin/api/enviar"), {{
+    method: "POST",
+    headers: {{"Content-Type": "application/json"}},
+    body: JSON.stringify({{numero, texto}})
+  }});
+  await cargarConversaciones();
+  abrirChat(numero);
+}}
+
+cargarConversaciones();
+setInterval(cargarConversaciones, 30000);
+</script>
+</body>
+</html>"""
+    return Response(html, mimetype="text/html")
+
+@app.route("/admin/api/conversaciones")
+def api_conversaciones():
+    if not _auth_admin(request):
+        return jsonify({"error": "no autorizado"}), 401
+    return jsonify(_notion_conversaciones())
+
+@app.route("/admin/api/tomar/<numero>", methods=["POST"])
+def api_tomar(numero):
+    if not _auth_admin(request):
+        return jsonify({"error": "no autorizado"}), 401
+    NUMEROS_EN_HUMANO.add(numero)
+    print(f"[ADMIN] {numero} tomado por humano")
+    return jsonify({"ok": True})
+
+@app.route("/admin/api/liberar/<numero>", methods=["POST"])
+def api_liberar(numero):
+    if not _auth_admin(request):
+        return jsonify({"error": "no autorizado"}), 401
+    NUMEROS_EN_HUMANO.discard(numero)
+    print(f"[ADMIN] {numero} devuelto al bot")
+    return jsonify({"ok": True})
+
+@app.route("/admin/api/enviar", methods=["POST"])
+def api_enviar():
+    if not _auth_admin(request):
+        return jsonify({"error": "no autorizado"}), 401
+    data = request.get_json()
+    numero = data.get("numero", "")
+    texto = data.get("texto", "")
+    if not numero or not texto:
+        return jsonify({"error": "faltan datos"}), 400
+    enviar_whatsapp(numero, texto)
+    guardar_conversacion(numero, "Humano", texto)
+    return jsonify({"ok": True})
 
 if __name__ == "__main__":
     threading.Thread(target=_scheduler_reporte, daemon=True).start()

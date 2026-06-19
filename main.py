@@ -723,7 +723,7 @@ def generar_respuesta(numero, contenido_api, texto_plano):
         mensajes = historial + [{"role": "user", "content": contenido_con_cerebro}]
         texto = ""
         for _ in range(4):
-            respuesta = cliente_ia.messages.create(
+            respuesta = cliente_ia.beta.messages.create(
                 model=MODELO,
                 max_tokens=600,
                 system=system,

@@ -1008,13 +1008,18 @@ def _notion_conversaciones():
         rows = []
         for p in r.json().get("results", []):
             props = p.get("properties", {})
-            def txt(key):
-                arr = props.get(key, {}).get("title") or props.get(key, {}).get("rich_text") or []
-                return "".join(x.get("plain_text", "") for x in arr)
+            # Número es phone_number
+            numero = props.get("Número", {}).get("phone_number") or ""
+            # Quién es select
+            quien_obj = props.get("Quién", {}).get("select") or {}
+            quien = quien_obj.get("name", "")
+            # Mensaje es title
+            mensaje_arr = props.get("Mensaje", {}).get("title") or []
+            mensaje = "".join(x.get("plain_text", "") for x in mensaje_arr)
             rows.append({
-                "numero": txt("Número"),
-                "quien": txt("Quién"),
-                "mensaje": txt("Mensaje"),
+                "numero": numero,
+                "quien": quien,
+                "mensaje": mensaje,
                 "fecha": p.get("created_time", "")[:16].replace("T", " "),
             })
         return rows

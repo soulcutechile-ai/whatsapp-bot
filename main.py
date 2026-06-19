@@ -665,6 +665,16 @@ def enviar_whatsapp(numero, texto):
         print(f"Error enviando WhatsApp: {r.status_code} - {r.text}")
     return r
 
+def enviar_dividido(numero, texto):
+    """Divide la respuesta por ||| y envía cada parte como mensaje separado con delay."""
+    partes = [p.strip() for p in texto.split("|||") if p.strip()]
+    if not partes:
+        partes = [texto]
+    for i, parte in enumerate(partes):
+        enviar_whatsapp(numero, parte)
+        if i < len(partes) - 1:
+            time.sleep(0.8)  # pequeño delay entre mensajes para que lleguen en orden
+
 # ─── AVISAR A TELEGRAM (cuando se necesita humano) ──────────────────────────
 def clasificar_caso(texto_cliente, texto_bot):
     t = f"{texto_cliente} {texto_bot}".lower()
@@ -928,7 +938,7 @@ def recibir():
             print(f"Mensaje de {numero}: {texto_clienta}")
             guardar_conversacion(numero, "Cliente", texto_clienta)
             respuesta = generar_respuesta(numero, texto_clienta, texto_clienta)
-            enviar_whatsapp(numero, respuesta)
+            enviar_dividido(numero, respuesta)
             guardar_conversacion(numero, "Bot", respuesta)
 
         elif tipo == "image":
@@ -953,7 +963,7 @@ def recibir():
             ]
             texto_plano = "📷 La clienta envió una foto. " + caption
             respuesta = generar_respuesta(numero, contenido, texto_plano)
-            enviar_whatsapp(numero, respuesta)
+            enviar_dividido(numero, respuesta)
             guardar_conversacion(numero, "Bot", respuesta)
 
         elif tipo == "audio":
@@ -968,7 +978,7 @@ def recibir():
             print(f"Audio de {numero} transcrito: {transcripcion}")
             guardar_conversacion(numero, "Cliente", "🎙️ " + transcripcion)
             respuesta = generar_respuesta(numero, transcripcion, transcripcion)
-            enviar_whatsapp(numero, respuesta)
+            enviar_dividido(numero, respuesta)
             guardar_conversacion(numero, "Bot", respuesta)
 
         else:

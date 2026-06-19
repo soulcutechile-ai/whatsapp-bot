@@ -1014,9 +1014,32 @@ def _notion_conversaciones():
 
 @app.route("/admin")
 def panel_admin():
-    if not _auth_admin(request):
-        return Response("Acceso denegado", 401, {"WWW-Authenticate": 'Basic realm="Soulcute Admin"'})
     pwd = request.args.get("pwd", "")
+    if pwd != ADMIN_PASSWORD:
+        return Response("""<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8"><title>Soulcute Admin</title>
+<style>*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,sans-serif}
+body{background:#f5f5f5;display:flex;align-items:center;justify-content:center;height:100vh}
+.card{background:#fff;border-radius:12px;padding:32px;width:320px;border:1px solid #e5e5e5}
+h2{font-size:16px;font-weight:500;margin-bottom:4px}
+p{font-size:13px;color:#888;margin-bottom:20px}
+input{width:100%;padding:9px 12px;border:1px solid #ddd;border-radius:8px;font-size:13px;margin-bottom:12px;outline:none}
+input:focus{border-color:#7B3F6E}
+button{width:100%;padding:10px;background:#7B3F6E;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer}
+button:hover{background:#6B3560}
+.logo{width:40px;height:40px;background:#7B3F6E;border-radius:10px;display:flex;align-items:center;justify-content:center;margin-bottom:16px}
+</style></head>
+<body><div class="card">
+<div class="logo"><svg width="22" height="22" fill="none" viewBox="0 0 24 24" stroke="#fff" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+<h2>Soulcute — Panel WhatsApp</h2>
+<p>Ingresa la contraseña para continuar</p>
+<form onsubmit="login(event)">
+<input type="password" id="pwd" placeholder="Contraseña" autofocus>
+<button type="submit">Entrar</button>
+</form>
+</div>
+<script>function login(e){e.preventDefault();const p=document.getElementById('pwd').value;if(p)window.location.href='/admin?pwd='+encodeURIComponent(p);}</script>
+</body></html>""", mimetype="text/html")
     html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>

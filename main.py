@@ -149,13 +149,18 @@ HERRAMIENTAS = [
     },
 ]
 
-# ─── CEREBRO DESDE NOTION (con caché para velocidad) ────────────────────────
-_cache = {"texto": None, "momento": 0}
-CACHE_SEGUNDOS = 86400  # relee Notion cada 2 minutos como máximo
+# ─── CEREBRO DESDE NOTION + FILES API DE ANTHROPIC ──────────────────────────
+_cache = {"texto": None, "file_id": None, "momento": 0}
+CACHE_SEGUNDOS = 86400  # relee Notion y actualiza el archivo cada 24h
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
     "Notion-Version": "2022-06-28",
+}
+FILES_API_HEADERS = {
+    "x-api-key": ANTHROPIC_API_KEY,
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": "files-api-2025-04-14",
 }
 
 def _rich(arr):
@@ -195,22 +200,71 @@ def _leer_bloques(page_id, prof=0):
             break
     return "\n".join(l for l in lineas if l)
 
-def obtener_cerebro():
+def _subir_cerebro_files_api(texto):
+    """Sube el cerebro como archivo a Anthropic Files API. Devuelve el file_id."""
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/files",
+            headers=FILES_API_HEADERS,
+            files={"file": ("cerebro_soulcute.txt", texto.encode("utf-8"), "text/plain")},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            file_id = r.json().get("id")
+            print(f"[FILES API] Cerebro subido → {file_id}")
+            return file_id
+        print(f"[FILES API] Error subiendo: {r.status_code} {r.text[:200]}")
+        return None
+    except Exception as e:
+        print(f"[FILES API] Excepción subiendo: {e}")
+        return None
+
+def _eliminar_archivo_files_api(file_id):
+    """Elimina un archivo anterior de Anthropic Files API."""
+    try:
+        r = requests.delete(
+            f"https://api.anthropic.com/v1/files/{file_id}",
+            headers=FILES_API_HEADERS,
+            timeout=15,
+        )
+        print(f"[FILES API] Archivo {file_id} eliminado → {r.status_code}")
+    except Exception as e:
+        print(f"[FILES API] Error eliminando {file_id}: {e}")
+
+def obtener_file_id_cerebro():
+    """
+    Devuelve el file_id del cerebro en Anthropic Files API.
+    Si el caché de 24h expiró: relee Notion, sube nuevo archivo, elimina el viejo.
+    """
     if not NOTION_TOKEN or not NOTION_PAGE_ID:
-        return FALLBACK_CEREBRO
+        return None  # fallback: usa texto directo
     ahora = time.time()
-    if _cache["texto"] and (ahora - _cache["momento"] < CACHE_SEGUNDOS):
-        return _cache["texto"]
+    if _cache["file_id"] and (ahora - _cache["momento"] < CACHE_SEGUNDOS):
+        return _cache["file_id"]
     try:
         texto = _leer_bloques(NOTION_PAGE_ID)
-        if texto and len(texto) > 50:
+        if not texto or len(texto) < 50:
+            texto = _cache["texto"] or FALLBACK_CEREBRO
+        file_id_nuevo = _subir_cerebro_files_api(texto)
+        if file_id_nuevo:
+            # Eliminar el archivo anterior si existe
+            if _cache["file_id"]:
+                threading.Thread(
+                    target=_eliminar_archivo_files_api,
+                    args=(_cache["file_id"],),
+                    daemon=True,
+                ).start()
             _cache["texto"] = texto
+            _cache["file_id"] = file_id_nuevo
             _cache["momento"] = ahora
-            return texto
-        return _cache["texto"] or FALLBACK_CEREBRO
+            return file_id_nuevo
+        # Si falla la subida, usar texto directo como fallback
+        _cache["texto"] = texto
+        _cache["momento"] = ahora
+        return None
     except Exception as e:
-        print(f"Error leyendo Notion: {e}")
-        return _cache["texto"] or FALLBACK_CEREBRO
+        print(f"[FILES API] Error actualizando cerebro: {e}")
+        return _cache["file_id"]
 
 # ─── GUARDAR CONVERSACIÓN EN NOTION (en segundo plano) ──────────────────────
 def _guardar_conversacion(numero, quien, mensaje):
@@ -641,10 +695,32 @@ def avisar_humano(numero, mensaje_clienta, categoria="💬 Consulta general"):
 # ─── GENERAR RESPUESTA CON IA (con uso de herramientas) ─────────────────────
 def generar_respuesta(numero, contenido_api, texto_plano):
     historial = conversaciones.get(numero, [])
-    mensajes = historial + [{"role": "user", "content": contenido_api}]
     try:
-        # Prompt Caching: el system prompt se cachea 5 min → 90% descuento en tokens de entrada
-        system = [{"type": "text", "text": INSTRUCCION_FIJA + obtener_cerebro(), "cache_control": {"type": "ephemeral"}}]
+        # System prompt: solo INSTRUCCION_FIJA con Prompt Caching (texto pequeño y estático)
+        system = [{"type": "text", "text": INSTRUCCION_FIJA, "cache_control": {"type": "ephemeral"}}]
+
+        # Cerebro: se adjunta como documento via Files API (costo fijo, no crece con el cerebro)
+        file_id = obtener_file_id_cerebro()
+        if file_id:
+            # Cerebro como archivo → casi 0 tokens por mensaje
+            if isinstance(contenido_api, str):
+                contenido_con_cerebro = [
+                    {"type": "document", "source": {"type": "file", "file_id": file_id}},
+                    {"type": "text", "text": contenido_api},
+                ]
+            else:
+                contenido_con_cerebro = [
+                    {"type": "document", "source": {"type": "file", "file_id": file_id}},
+                ] + (contenido_api if isinstance(contenido_api, list) else [contenido_api])
+        else:
+            # Fallback: usa texto directo si Files API falla
+            texto_cerebro = _cache.get("texto") or FALLBACK_CEREBRO
+            if isinstance(contenido_api, str):
+                contenido_con_cerebro = [{"type": "text", "text": f"[Contexto del negocio]\n{texto_cerebro}\n\n[Mensaje]\n{contenido_api}"}]
+            else:
+                contenido_con_cerebro = contenido_api
+
+        mensajes = historial + [{"role": "user", "content": contenido_con_cerebro}]
         texto = ""
         for _ in range(4):
             respuesta = cliente_ia.messages.create(
@@ -653,7 +729,7 @@ def generar_respuesta(numero, contenido_api, texto_plano):
                 system=system,
                 messages=mensajes,
                 tools=HERRAMIENTAS,
-                betas=["prompt-caching-2024-07-31"],
+                betas=["prompt-caching-2024-07-31", "files-api-2025-04-14"],
             )
             if respuesta.stop_reason == "tool_use":
                 assistant_blocks, tool_results = [], []

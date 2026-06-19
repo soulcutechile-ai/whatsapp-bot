@@ -49,7 +49,7 @@ SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "")
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-MODELO = "claude-haiku-4-5-20251001"
+MODELO = "claude-sonnet-4-6"
 
 app = Flask(__name__)
 cliente_ia = Anthropic(api_key=ANTHROPIC_API_KEY)

@@ -411,8 +411,8 @@ def consultar_producto(handle=None, busqueda=None, talla=None, color=None):
             if v.get("availableForSale"):
                 qn = v.get("inventoryQuantity")
                 tracked = (v.get("inventoryItem") or {}).get("tracked", True)
-                if tracked and isinstance(qn, int) and qn > 0:
-                    disponibles.append(f"{etiqueta} (quedan {qn})")
+                if tracked and isinstance(qn, int) and qn <= 3:
+                    disponibles.append(f"{etiqueta} (pocas unidades, no dar el número exacto)")
                 else:
                     disponibles.append(f"{etiqueta} (disponible)")
             else:
@@ -944,7 +944,7 @@ def recibir():
         elif tipo == "image":
             media_id = mensaje["image"]["id"]
             caption = (mensaje["image"].get("caption") or "").strip()
-            guardar_conversacion(numero, "Cliente", "📷 Foto. " + caption)
+            guardar_conversacion(numero, "Cliente", f"[media:{media_id}]" + (" " + caption if caption else ""))
             img_bytes, mime = descargar_media(media_id)
             if not img_bytes:
                 enviar_whatsapp(numero, "Uy, no pude abrir bien tu foto 😅 ¿me la reenvías o me cuentas cómo es la prenda?")
@@ -996,6 +996,16 @@ def inicio():
 def _auth_admin(req):
     pwd = req.args.get("pwd") or req.headers.get("X-Admin-Password", "")
     return pwd == ADMIN_PASSWORD
+
+@app.route("/admin/media/<media_id>")
+def admin_media(media_id):
+    """Proxy: descarga una foto/audio de WhatsApp y lo sirve al panel (requiere pwd)."""
+    if not _auth_admin(request):
+        return "No autorizado", 401
+    contenido, mime = descargar_media(media_id)
+    if not contenido:
+        return "No se pudo cargar el archivo", 404
+    return Response(contenido, mimetype=mime or "image/jpeg")
 
 def _notion_conversaciones():
     """Lee últimas 50 entradas de la BD de conversaciones en Notion."""
@@ -1110,7 +1120,19 @@ textarea:focus{{border-color:#7B3F6E}}
 .send-btn{{background:#7B3F6E;color:#fff;border:none;border-radius:8px;padding:0 20px;cursor:pointer;font-size:13px;font-weight:500;height:60px}}
 .send-btn:hover{{background:#6B3560}}
 .empty{{flex:1;display:flex;align-items:center;justify-content:center;color:#999;font-size:14px}}
-.back-btn{{display:none;background:none;border:none;color:#fff;font-size:20px;cursor:pointer;padding:0 4px}}
+.back-btn{{display:none;background:none;border:none;color:#fff;font-size:22px;cursor:pointer;padding:0 6px;line-height:1;font-weight:600}}
+.back-btn:hover{{opacity:0.8}}
+.attach-btn{{background:none;border:1px solid #ddd;border-radius:8px;width:60px;height:60px;cursor:pointer;color:#7B3F6E;font-size:20px;flex-shrink:0;display:flex;align-items:center;justify-content:center}}
+.attach-btn:hover{{background:#faf5f9}}
+.attach-btn:disabled{{opacity:0.4;cursor:not-allowed}}
+.msg-img{{max-width:240px;border-radius:10px;display:block;cursor:pointer}}
+.preview-bar{{display:none;align-items:center;gap:8px;padding:8px 0;font-size:12px;color:#666}}
+.preview-bar.show{{display:flex}}
+.preview-bar img{{width:36px;height:36px;object-fit:cover;border-radius:6px}}
+.preview-cancel{{margin-left:auto;background:none;border:none;color:#b91c1c;cursor:pointer;font-size:12px;font-weight:500}}
+.lightbox{{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:999;align-items:center;justify-content:center;cursor:zoom-out}}
+.lightbox.show{{display:flex}}
+.lightbox img{{max-width:90%;max-height:90%;border-radius:8px}}
 
 @media (max-width: 768px) {{
   .topbar h1{{font-size:13px}}
@@ -1125,12 +1147,14 @@ textarea:focus{{border-color:#7B3F6E}}
   .msg{{max-width:85%}}
   .reply-row{{flex-direction:column}}
   .send-btn{{height:40px}}
+  .attach-btn{{height:40px;width:40px}}
   textarea{{height:50px}}
 }}
 </style>
 </head>
 <body>
 <div class="topbar">
+  <button class="back-btn" id="topbar-back" onclick="volverLista()" style="display:none">←</button>
   <i class="ti ti-message-circle" style="font-size:20px"></i>
   <h1>Soulcute — Panel WhatsApp</h1>
   <span>+56 9 8260 1800</span>
@@ -1151,12 +1175,34 @@ textarea:focus{{border-color:#7B3F6E}}
     <div class="empty"><div style="text-align:center"><i class="ti ti-message-2" style="font-size:40px;display:block;margin-bottom:8px;opacity:0.3"></i>Selecciona una conversación</div></div>
   </div>
 </div>
+<div class="lightbox" id="lightbox" onclick="this.classList.remove('show')">
+  <img id="lightbox-img" src="">
+</div>
+<input type="file" id="file-input" accept="image/*" style="display:none" onchange="archivoSeleccionado()">
 <script>
 const PWD = "{pwd}";
 const API = (path) => path + "?pwd=" + PWD;
 let numeroActivo = null;
 let numerosHumano = new Set();
 let convData = {{}};
+let archivoPendiente = null;
+
+function renderMensaje(texto) {{
+  const m = texto.match(/^\\[media:([^\\]]+)\\]\\s*(.*)$/s);
+  if (m) {{
+    const mediaId = m[1];
+    const caption = m[2] || "";
+    const src = "/admin/media/" + mediaId + "?pwd=" + PWD;
+    return `<img class="msg-img" src="${{src}}" onclick="abrirLightbox('${{src}}')" onerror="this.outerHTML='📷 <i>No se pudo cargar la foto</i>'">` +
+           (caption ? `<div style="margin-top:6px">${{caption}}</div>` : "");
+  }}
+  return texto.replace(/\\n/g, "<br>");
+}}
+
+function abrirLightbox(src) {{
+  document.getElementById("lightbox-img").src = src;
+  document.getElementById("lightbox").classList.add("show");
+}}
 
 async function cargarConversaciones() {{
   const r = await fetch(API("/admin/api/conversaciones"));
@@ -1173,25 +1219,24 @@ async function cargarConversaciones() {{
     const msgs = convData[n];
     const ultimo = msgs[0];
     const enHumano = numerosHumano.has(n);
+    const previa = ultimo.mensaje.startsWith("[media:") ? "📷 Foto" : ultimo.mensaje.slice(0,40);
     return `<div class="conv-item${{n === numeroActivo ? " active" : ""}}" onclick="abrirChat('${{n}}')">
       <div class="conv-top"><span class="conv-num">${{n}}</span><span class="conv-time">${{ultimo.fecha.slice(11)}}</span></div>
-      <div class="conv-last">${{ultimo.quien}}: ${{ultimo.mensaje.slice(0,40)}}</div>
+      <div class="conv-last">${{ultimo.quien}}: ${{previa}}</div>
       <span class="${{enHumano ? "badge-humano" : "badge-bot"}}">${{enHumano ? "🟠 Tú atiendes" : "🟢 Bot"}}</span>
     </div>`;
   }}).join("");
 }}
 
-function abrirChat(numero) {{
-  numeroActivo = numero;
-  cargarConversaciones();
-  document.querySelector(".sidebar").classList.add("hide-mobile");
-  document.getElementById("chat-area").classList.add("show-mobile");
+function renderChatInterno(numero) {{
   const msgs = convData[numero] || [];
   const enHumano = numerosHumano.has(numero);
   const area = document.getElementById("chat-area");
+  const scrollPrevio = document.getElementById("msgs") ? document.getElementById("msgs").scrollTop : null;
+  const inputPrevio = document.getElementById("msg-input") ? document.getElementById("msg-input").value : "";
   area.innerHTML = `
     <div class="chat-header">
-      <button class="back-btn" onclick="volverLista()"><i class="ti ti-arrow-left"></i></button>
+      <button class="back-btn" onclick="volverLista()">←</button>
       <i class="ti ti-user-circle" style="font-size:28px;color:#7B3F6E"></i>
       <h2>${{numero}}</h2>
       ${{enHumano
@@ -1203,45 +1248,102 @@ function abrirChat(numero) {{
       ${{[...msgs].reverse().map(m => {{
         const cls = m.quien === "Cliente" ? "msg-cliente" : m.quien === "Bot" ? "msg-bot" : "msg-humano";
         const bcls = m.quien === "Cliente" ? "bubble-cliente" : m.quien === "Bot" ? "bubble-bot" : "bubble-humano";
-        return `<div class="msg ${{cls}}"><div class="bubble ${{bcls}}">${{m.mensaje}}</div><div class="msg-meta">${{m.quien}} · ${{m.fecha}}</div></div>`;
+        return `<div class="msg ${{cls}}"><div class="bubble ${{bcls}}">${{renderMensaje(m.mensaje)}}</div><div class="msg-meta">${{m.quien}} · ${{m.fecha}}</div></div>`;
       }}).join("")}}
     </div>
     <div class="reply-area">
       <div class="reply-status">${{enHumano
         ? `<span style="color:#b45309">⚠️ Bot pausado — tú estás atendiendo este chat</span>`
-        : `<span style="color:#6b7280">ℹ️ El bot está respondiendo. Haz clic en "Tomar conversación" para responder tú.</span>`
+        : `<span style="color:#6b7280">ℹ️ El bot está respondiendo. Toca "Tomar conversación" para responder tú.</span>`
       }}</div>
+      <div class="preview-bar" id="preview-bar">
+        <img id="preview-img" src="">
+        <span id="preview-name"></span>
+        <button class="preview-cancel" onclick="cancelarArchivo()">Quitar</button>
+      </div>
       <div class="reply-row">
-        <textarea id="msg-input" placeholder="${{enHumano ? "Escribe tu respuesta..." : "Toma la conversación primero para responder"}}" ${{enHumano ? "" : "disabled"}}></textarea>
+        <button class="attach-btn" onclick="document.getElementById('file-input').click()" ${{enHumano ? "" : "disabled"}}>📎</button>
+        <textarea id="msg-input" placeholder="${{enHumano ? "Escribe tu respuesta..." : "Toma la conversación primero para responder"}}" ${{enHumano ? "" : "disabled"}}>${{inputPrevio}}</textarea>
         <button class="send-btn" onclick="enviarMensaje('${{numero}}')" ${{enHumano ? "" : "disabled"}}>Enviar</button>
       </div>
     </div>`;
   const msgsEl = document.getElementById("msgs");
-  if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight;
+  if (msgsEl) msgsEl.scrollTop = scrollPrevio !== null ? scrollPrevio : msgsEl.scrollHeight;
+}}
+
+function abrirChat(numero) {{
+  const esNuevo = numero !== numeroActivo;
+  numeroActivo = numero;
+  cargarConversaciones();
+  document.querySelector(".sidebar").classList.add("hide-mobile");
+  document.getElementById("chat-area").classList.add("show-mobile");
+  document.getElementById("topbar-back").style.display = "inline-block";
+  renderChatInterno(numero);
+  if (esNuevo) {{
+    const msgsEl = document.getElementById("msgs");
+    if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight;
+  }}
 }}
 
 function volverLista() {{
   numeroActivo = null;
   document.querySelector(".sidebar").classList.remove("hide-mobile");
   document.getElementById("chat-area").classList.remove("show-mobile");
+  document.getElementById("topbar-back").style.display = "none";
+  document.getElementById("chat-area").innerHTML = '<div class="empty"><div style="text-align:center"><i class="ti ti-message-2" style="font-size:40px;display:block;margin-bottom:8px;opacity:0.3"></i>Selecciona una conversación</div></div>';
   cargarConversaciones();
 }}
 
 async function tomarConversacion(numero) {{
   await fetch(API("/admin/api/tomar/" + numero), {{method: "POST"}});
   numerosHumano.add(numero);
-  abrirChat(numero);
+  renderChatInterno(numero);
 }}
 
 async function liberarBot(numero) {{
   await fetch(API("/admin/api/liberar/" + numero), {{method: "POST"}});
   numerosHumano.delete(numero);
-  abrirChat(numero);
+  renderChatInterno(numero);
+}}
+
+function archivoSeleccionado() {{
+  const input = document.getElementById("file-input");
+  if (!input.files || !input.files[0]) return;
+  archivoPendiente = input.files[0];
+  const bar = document.getElementById("preview-bar");
+  const img = document.getElementById("preview-img");
+  const name = document.getElementById("preview-name");
+  img.src = URL.createObjectURL(archivoPendiente);
+  name.textContent = archivoPendiente.name;
+  bar.classList.add("show");
+}}
+
+function cancelarArchivo() {{
+  archivoPendiente = null;
+  document.getElementById("file-input").value = "";
+  document.getElementById("preview-bar").classList.remove("show");
 }}
 
 async function enviarMensaje(numero) {{
   const input = document.getElementById("msg-input");
   const texto = input.value.trim();
+
+  if (archivoPendiente) {{
+    const fd = new FormData();
+    fd.append("numero", numero);
+    fd.append("caption", texto);
+    fd.append("archivo", archivoPendiente);
+    cancelarArchivo();
+    input.value = "";
+    const r = await fetch(API("/admin/api/enviar_imagen"), {{ method: "POST", body: fd }});
+    if (!r.ok) {{ const e = await r.json(); alert("Error enviando imagen: " + (e.error || "intenta de nuevo")); }}
+    await cargarConversaciones();
+    renderChatInterno(numero);
+    const msgsEl = document.getElementById("msgs");
+    if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight;
+    return;
+  }}
+
   if (!texto) return;
   input.value = "";
   await fetch(API("/admin/api/enviar"), {{
@@ -1250,11 +1352,16 @@ async function enviarMensaje(numero) {{
     body: JSON.stringify({{numero, texto}})
   }});
   await cargarConversaciones();
-  abrirChat(numero);
+  renderChatInterno(numero);
+  const msgsEl = document.getElementById("msgs");
+  if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight;
 }}
 
 cargarConversaciones();
-setInterval(cargarConversaciones, 30000);
+setInterval(() => {{
+  cargarConversaciones();
+  if (numeroActivo) renderChatInterno(numeroActivo);
+}}, 15000);
 </script>
 </body>
 </html>"""
@@ -1280,6 +1387,52 @@ def api_liberar(numero):
         return jsonify({"error": "no autorizado"}), 401
     NUMEROS_EN_HUMANO.discard(numero)
     print(f"[ADMIN] {numero} devuelto al bot")
+    return jsonify({"ok": True})
+
+def _subir_media_whatsapp(file_bytes, mime):
+    """Sube un archivo a WhatsApp Cloud API y devuelve el media_id."""
+    try:
+        r = requests.post(
+            f"https://graph.facebook.com/v21.0/{WHATSAPP_PHONE_ID}/media",
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+            files={"file": ("imagen", file_bytes, mime)},
+            data={"messaging_product": "whatsapp", "type": mime},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            return r.json().get("id")
+        print(f"[WHATSAPP MEDIA] Error subiendo: {r.status_code} {r.text[:200]}")
+        return None
+    except Exception as e:
+        print(f"[WHATSAPP MEDIA] Excepción: {e}")
+        return None
+
+@app.route("/admin/api/enviar_imagen", methods=["POST"])
+def api_enviar_imagen():
+    if not _auth_admin(request):
+        return jsonify({"error": "no autorizado"}), 401
+    numero = request.form.get("numero", "")
+    caption = request.form.get("caption", "").strip()
+    archivo = request.files.get("archivo")
+    if not numero or not archivo:
+        return jsonify({"error": "faltan datos"}), 400
+    file_bytes = archivo.read()
+    mime = archivo.mimetype or "image/jpeg"
+    media_id = _subir_media_whatsapp(file_bytes, mime)
+    if not media_id:
+        return jsonify({"error": "no se pudo subir la imagen a WhatsApp"}), 500
+    url = f"https://graph.facebook.com/v21.0/{WHATSAPP_PHONE_ID}/messages"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": numero,
+        "type": "image",
+        "image": {"id": media_id, **({"caption": caption} if caption else {})},
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    if r.status_code != 200:
+        return jsonify({"error": f"WhatsApp rechazó el envío: {r.text[:200]}"}), 500
+    guardar_conversacion(numero, "Humano", f"[media:{media_id}]" + (" " + caption if caption else ""))
     return jsonify({"ok": True})
 
 @app.route("/admin/api/enviar", methods=["POST"])

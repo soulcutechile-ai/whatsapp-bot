@@ -1110,6 +1110,23 @@ textarea:focus{{border-color:#7B3F6E}}
 .send-btn{{background:#7B3F6E;color:#fff;border:none;border-radius:8px;padding:0 20px;cursor:pointer;font-size:13px;font-weight:500;height:60px}}
 .send-btn:hover{{background:#6B3560}}
 .empty{{flex:1;display:flex;align-items:center;justify-content:center;color:#999;font-size:14px}}
+.back-btn{{display:none;background:none;border:none;color:#fff;font-size:20px;cursor:pointer;padding:0 4px}}
+
+@media (max-width: 768px) {{
+  .topbar h1{{font-size:13px}}
+  .topbar span{{display:none}}
+  .layout{{position:relative}}
+  .sidebar{{width:100%;position:absolute;inset:0;z-index:1;transition:transform 0.2s}}
+  .sidebar.hide-mobile{{transform:translateX(-100%)}}
+  .chat-area{{width:100%;position:absolute;inset:0;z-index:2;background:#f5f5f5;transform:translateX(100%);transition:transform 0.2s}}
+  .chat-area.show-mobile{{transform:translateX(0)}}
+  .back-btn{{display:inline-block}}
+  .chat-header h2{{font-size:13px}}
+  .msg{{max-width:85%}}
+  .reply-row{{flex-direction:column}}
+  .send-btn{{height:40px}}
+  textarea{{height:50px}}
+}}
 </style>
 </head>
 <body>
@@ -1167,11 +1184,14 @@ async function cargarConversaciones() {{
 function abrirChat(numero) {{
   numeroActivo = numero;
   cargarConversaciones();
+  document.querySelector(".sidebar").classList.add("hide-mobile");
+  document.getElementById("chat-area").classList.add("show-mobile");
   const msgs = convData[numero] || [];
   const enHumano = numerosHumano.has(numero);
   const area = document.getElementById("chat-area");
   area.innerHTML = `
     <div class="chat-header">
+      <button class="back-btn" onclick="volverLista()"><i class="ti ti-arrow-left"></i></button>
       <i class="ti ti-user-circle" style="font-size:28px;color:#7B3F6E"></i>
       <h2>${{numero}}</h2>
       ${{enHumano
@@ -1198,6 +1218,13 @@ function abrirChat(numero) {{
     </div>`;
   const msgsEl = document.getElementById("msgs");
   if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight;
+}}
+
+function volverLista() {{
+  numeroActivo = null;
+  document.querySelector(".sidebar").classList.remove("hide-mobile");
+  document.getElementById("chat-area").classList.remove("show-mobile");
+  cargarConversaciones();
 }}
 
 async function tomarConversacion(numero) {{

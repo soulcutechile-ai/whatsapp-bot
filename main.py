@@ -35,6 +35,10 @@ NOTION_PAGE_ID = os.environ.get("NOTION_PAGE_ID", "")
 NOTION_DB_CONVERSACIONES = os.environ.get(
     "NOTION_DB_CONVERSACIONES", "bc17e2ba-92d9-40c3-ac37-16abeb09ae34"
 )
+# Notion: base de datos que persiste qué números atiende un humano (sobrevive reinicios)
+NOTION_DB_ESTADO = os.environ.get(
+    "NOTION_DB_ESTADO", "82493c87-eb0f-4a75-a5aa-5c1601b3d8c3"
+)
 
 # Panel de administración
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "soulcute2024")
@@ -296,6 +300,74 @@ def _guardar_conversacion(numero, quien, mensaje):
 
 def guardar_conversacion(numero, quien, mensaje):
     threading.Thread(target=_guardar_conversacion, args=(numero, quien, mensaje), daemon=True).start()
+
+# ─── PERSISTENCIA DE "QUIÉN ATIENDE" (sobrevive reinicios de Railway) ────────
+def _buscar_pagina_estado(numero):
+    """Devuelve el page_id de la fila de Notion para este número, o None si no existe."""
+    try:
+        url = f"https://api.notion.com/v1/databases/{NOTION_DB_ESTADO}/query"
+        body = {"filter": {"property": "Número", "title": {"equals": numero}}}
+        r = requests.post(url, headers=NOTION_HEADERS, json=body, timeout=15)
+        if r.status_code != 200:
+            return None
+        results = r.json().get("results", [])
+        return results[0]["id"] if results else None
+    except Exception as e:
+        print(f"[ESTADO] Error buscando página de {numero}: {e}")
+        return None
+
+def _guardar_estado_humano(numero, asignado):
+    """asignado = 'Humano' o 'Bot'. Crea o actualiza la fila en Notion."""
+    if not NOTION_TOKEN or not NOTION_DB_ESTADO:
+        return
+    try:
+        page_id = _buscar_pagina_estado(numero)
+        props = {
+            "Asignado a": {"select": {"name": asignado}},
+            "Actualizado": {"date": {"start": datetime.now(TZ).isoformat()}},
+        }
+        if page_id:
+            requests.patch(
+                f"https://api.notion.com/v1/pages/{page_id}",
+                headers={**NOTION_HEADERS, "Content-Type": "application/json"},
+                json={"properties": props},
+                timeout=15,
+            )
+        else:
+            props["Número"] = {"title": [{"text": {"content": numero}}]}
+            requests.post(
+                "https://api.notion.com/v1/pages",
+                headers={**NOTION_HEADERS, "Content-Type": "application/json"},
+                json={"parent": {"database_id": NOTION_DB_ESTADO}, "properties": props},
+                timeout=15,
+            )
+    except Exception as e:
+        print(f"[ESTADO] Error guardando estado de {numero}: {e}")
+
+def guardar_estado_humano(numero, asignado):
+    threading.Thread(target=_guardar_estado_humano, args=(numero, asignado), daemon=True).start()
+
+def cargar_numeros_en_humano():
+    """Al arrancar el bot, recupera de Notion qué números deben seguir en modo humano."""
+    if not NOTION_TOKEN or not NOTION_DB_ESTADO:
+        return set()
+    try:
+        url = f"https://api.notion.com/v1/databases/{NOTION_DB_ESTADO}/query"
+        body = {"filter": {"property": "Asignado a", "select": {"equals": "Humano"}}}
+        r = requests.post(url, headers=NOTION_HEADERS, json=body, timeout=15)
+        if r.status_code != 200:
+            return set()
+        numeros = set()
+        for p in r.json().get("results", []):
+            arr = p.get("properties", {}).get("Número", {}).get("title", [])
+            numero = "".join(x.get("plain_text", "") for x in arr)
+            if numero:
+                numeros.add(numero)
+        print(f"[ESTADO] Recuperados {len(numeros)} número(s) en modo humano desde Notion")
+        return numeros
+    except Exception as e:
+        print(f"[ESTADO] Error cargando estado inicial: {e}")
+        return set()
 
 # ─── TOKEN SHOPIFY: RENOVACIÓN AUTOMÁTICA (Client Credentials Grant) ─────────
 _shopify_token_cache = {"token": None, "expires_at": 0}
@@ -1026,11 +1098,17 @@ def _notion_conversaciones():
             # Mensaje es title
             mensaje_arr = props.get("Mensaje", {}).get("title") or []
             mensaje = "".join(x.get("plain_text", "") for x in mensaje_arr)
+            # "Fecha" ya se guarda en hora de Chile (datetime.now(TZ)); created_time de Notion es UTC.
+            fecha_chile = (props.get("Fecha", {}).get("date") or {}).get("start")
+            if fecha_chile:
+                fecha = fecha_chile[:16].replace("T", " ")
+            else:
+                fecha = p.get("created_time", "")[:16].replace("T", " ")
             rows.append({
                 "numero": numero,
                 "quien": quien,
                 "mensaje": mensaje,
-                "fecha": p.get("created_time", "")[:16].replace("T", " "),
+                "fecha": fecha,
             })
         return rows
     except Exception as e:
@@ -1357,9 +1435,23 @@ async function enviarMensaje(numero) {{
   if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight;
 }}
 
-cargarConversaciones();
-setInterval(() => {{
-  cargarConversaciones();
+async function cargarEstadoHumano() {{
+  try {{
+    const r = await fetch(API("/admin/api/estado"));
+    const data = await r.json();
+    numerosHumano = new Set(data.numeros_humano || []);
+  }} catch (e) {{ console.error("Error cargando estado:", e); }}
+}}
+
+async function iniciar() {{
+  await cargarEstadoHumano();
+  await cargarConversaciones();
+}}
+
+iniciar();
+setInterval(async () => {{
+  await cargarEstadoHumano();
+  await cargarConversaciones();
   if (numeroActivo) renderChatInterno(numeroActivo);
 }}, 15000);
 </script>
@@ -1373,11 +1465,18 @@ def api_conversaciones():
         return jsonify({"error": "no autorizado"}), 401
     return jsonify(_notion_conversaciones())
 
+@app.route("/admin/api/estado")
+def api_estado():
+    if not _auth_admin(request):
+        return jsonify({"error": "no autorizado"}), 401
+    return jsonify({"numeros_humano": list(NUMEROS_EN_HUMANO)})
+
 @app.route("/admin/api/tomar/<numero>", methods=["POST"])
 def api_tomar(numero):
     if not _auth_admin(request):
         return jsonify({"error": "no autorizado"}), 401
     NUMEROS_EN_HUMANO.add(numero)
+    guardar_estado_humano(numero, "Humano")
     print(f"[ADMIN] {numero} tomado por humano")
     return jsonify({"ok": True})
 
@@ -1386,6 +1485,7 @@ def api_liberar(numero):
     if not _auth_admin(request):
         return jsonify({"error": "no autorizado"}), 401
     NUMEROS_EN_HUMANO.discard(numero)
+    guardar_estado_humano(numero, "Bot")
     print(f"[ADMIN] {numero} devuelto al bot")
     return jsonify({"ok": True})
 
@@ -1448,7 +1548,10 @@ def api_enviar():
     guardar_conversacion(numero, "Humano", texto)
     return jsonify({"ok": True})
 
+# ─── INICIALIZACIÓN AL ARRANCAR (corre tanto con gunicorn como con python main.py) ───
+NUMEROS_EN_HUMANO |= cargar_numeros_en_humano()
+threading.Thread(target=_scheduler_reporte, daemon=True).start()
+
 if __name__ == "__main__":
-    threading.Thread(target=_scheduler_reporte, daemon=True).start()
     puerto = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=puerto)

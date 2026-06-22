@@ -70,21 +70,27 @@ mensajes_vistos = set()
 
 # Instrucción fija de seguridad: SIEMPRE aplica, aunque se edite la página de Notion.
 INSTRUCCION_FIJA = (
-    "Eres la asistente virtual de Soulcute (tienda chilena de moda femenina que moldea la figura), "
-    "atendiendo clientas por WhatsApp. Responde SIEMPRE en español, con tono cálido y cercano, tuteando. "
-    "Nunca hables de 'bajar de peso' (di 'moldear', 'estilizar', 'realzar la figura'). "
-    "Nunca inventes datos que no estén en tu información; si no sabes algo, ofrece amablemente que una "
-    "persona del equipo lo confirme. Sé concisa y natural para WhatsApp. "
-    "Cuando la clienta pregunte por PRECIO, STOCK, tallas, colores o detalles de un producto, usa la "
-    "herramienta 'consultar_producto' ANTES de responder. "
-    "REGLA CRÍTICA: el parámetro 'handle' es SOLO el identificador base del producto, SIN color ni talla. "
-    "Ejemplos correctos: handle='body-figura-ideal', handle='jeans-nova', handle='body-diosa-fit-copia'. "
-    "Si la clienta pide un color o talla específico, pásalos en los parámetros 'color' y 'talla', NUNCA los agregues al handle. "
-    "INCORRECTO: handle='body-figura-ideal-negro'. CORRECTO: handle='body-figura-ideal', color='Negro'. "
-    "Los handles exactos están en la sección LINKS DIRECTOS DE PRODUCTOS de tu información. "
-    "Los datos en vivo de Shopify mandan sobre cualquier precio o detalle escrito en tu información. "
-    "Nunca inventes precio ni disponibilidad. "
-    "A continuación tienes toda tu información y reglas:\n\n"
+    "Eres la asistente virtual de Soulcute (tienda chilena de moda femenina), atendiendo clientas por WhatsApp. "
+    "Responde SIEMPRE en español chileno, tuteando, con tono cálido y cercano. "
+    "Nunca hables de 'bajar de peso' — di 'moldear', 'estilizar', 'realzar la figura'. "
+    "Nunca inventes datos; si no sabes, ofrece que una persona del equipo confirme. "
+    "\n\nREGLAS DE BREVEDAD (CRÍTICAS, nunca las ignores):\n"
+    "- Cada mensaje dividido con ||| máximo 2 frases. UNA sola idea por parte. UNA sola pregunta por turno.\n"
+    "- NUNCA envíes un bloque largo. Si vas a escribir más de 2 líneas seguidas, divide con |||.\n"
+    "- Si ya preguntaste algo, NO lo repitas aunque la clienta no lo haya respondido directamente.\n"
+    "- NUNCA repitas lo que ya dijiste en mensajes anteriores del historial.\n"
+    "\nREGLAS DE TALLA:\n"
+    "- Todos los bodies: recomendar UNA TALLA MENOS de la habitual (son elásticos y tienen ajuste).\n"
+    "- EXCEPCIÓN: Body Noir Fit → recomendar la TALLA EXACTA (no una menos).\n"
+    "\nHERRAMIENTAS — úsalas antes de responder sobre productos:\n"
+    "- consultar_producto: precio, stock, tallas, colores. Handle = solo el identificador base SIN color ni talla.\n"
+    "  CORRECTO: handle='body-figura-ideal', color='Negro'. INCORRECTO: handle='body-figura-ideal-negro'.\n"
+    "- consultar_pedido: estado y tracking de pedidos.\n"
+    "- validar_descuento: verificar códigos. Úsala ANTES de decir que no funciona.\n"
+    "- verificar_cliente: para saber si aplica descuento primera compra.\n"
+    "- derivar_a_humano: cuando no puedas resolver tú misma (reclamos, problemas graves, devoluciones de dinero).\n"
+    "Los datos de Shopify mandan sobre cualquier otro dato. Nunca inventes precio ni disponibilidad.\n"
+    "\nA continuación tienes toda tu información y reglas:\n\n"
 )
 
 # ─── HERRAMIENTAS QUE PUEDE USAR LA IA ──────────────────────────────────────
@@ -153,6 +159,23 @@ HERRAMIENTAS = [
                 "email":    {"type": "string", "description": "Email de la clienta. Opcional si tienes teléfono."},
                 "telefono": {"type": "string", "description": "Teléfono de la clienta (con o sin código de país). Opcional si tienes email."},
             },
+        },
+    },
+    {
+        "name": "derivar_a_humano",
+        "description": (
+            "Usa esta herramienta cuando NO puedas resolver la consulta tú misma y necesites que una persona del equipo "
+            "de Soulcute atienda a la clienta. Casos en que DEBES usarla: reclamaciones de productos dañados o erróneos, "
+            "seguimiento de pedidos con problemas graves, solicitudes de devolución de dinero, preguntas sobre mayoristas, "
+            "situaciones emocionales o conflictivas, o cualquier consulta que supere tu conocimiento. "
+            "Al usarla, el equipo recibirá un aviso inmediato por Telegram."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "motivo": {"type": "string", "description": "Breve descripción de por qué se necesita un humano, ej: 'clienta reclama producto defectuoso'"},
+            },
+            "required": ["motivo"],
         },
     },
 ]
@@ -672,6 +695,11 @@ def ejecutar_herramienta(nombre, args):
         return validar_descuento(args.get("codigo", ""))
     if nombre == "verificar_cliente":
         return verificar_cliente(args.get("email"), args.get("telefono"))
+    if nombre == "derivar_a_humano":
+        motivo = args.get("motivo", "consulta que requiere atención humana")
+        # El aviso a Telegram se lanza desde generar_respuesta con el número real
+        # Aquí solo retornamos confirmación para que el bot sepa que puede avisar
+        return f"OK_DERIVAR:{motivo}"
     return "Herramienta desconocida."
 
 # ─── DESCARGAR ARCHIVO DE WHATSAPP (imágenes / audios) ──────────────────────
@@ -826,6 +854,10 @@ def generar_respuesta(numero, contenido_api, texto_plano):
                         assistant_blocks.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
                         resultado = ejecutar_herramienta(b.name, b.input)
                         tool_results.append({"type": "tool_result", "tool_use_id": b.id, "content": resultado})
+                        # Si la herramienta confirmó derivación → avisa a Telegram de inmediato
+                        if resultado.startswith("OK_DERIVAR:"):
+                            motivo = resultado.replace("OK_DERIVAR:", "").strip()
+                            avisar_humano(numero, texto_plano, f"🆘 {motivo}")
                 mensajes.append({"role": "assistant", "content": assistant_blocks})
                 mensajes.append({"role": "user", "content": tool_results})
                 continue
@@ -836,7 +868,11 @@ def generar_respuesta(numero, contenido_api, texto_plano):
         historial.append({"role": "user", "content": texto_plano})
         historial.append({"role": "assistant", "content": texto})
         conversaciones[numero] = historial[-MAX_HISTORIAL:]
-        if "una persona del equipo" in texto.lower() or "déjame confirmarte" in texto.lower():
+        if any(p in texto.lower() for p in [
+            "una persona del equipo", "déjame confirmarte", "dejame confirmarte",
+            "te pongo con", "te paso con", "alguien del equipo", "equipo te ayuda",
+            "equipo te responderá", "equipo te va a", "voy a consultar",
+        ]):
             categoria = clasificar_caso(texto_plano, texto)
             avisar_humano(numero, texto_plano, categoria)
         return texto
